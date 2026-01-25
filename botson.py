@@ -69,6 +69,7 @@ class BotApp:
             "video": ("send_video", "video"),
             "audio": ("send_audio", "audio"),
             "document": ("send_document", "document"),
+            "file": ("send_document", "document"),
             "hujjat": ("send_document", "document"),
             "animation": ("send_animation", "animation"),
         }
@@ -161,6 +162,30 @@ class BotApp:
             name,
             "audio",
             audio,
+            caption,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+            from_path=from_path,
+            **extra,
+        )
+
+    def file_command(
+        self,
+        name: str,
+        file: str,
+        caption: str = "",
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+        from_path: bool = False,
+        **extra,
+    ) -> None:
+        self.media_command(
+            name,
+            "document",
+            file,
             caption,
             recipients=recipients,
             silent=silent,
