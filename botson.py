@@ -4,9 +4,8 @@ from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Lit
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 from aiogram.types.input_file import FSInputFile
-from aiogram.types import InlineKeyboardMarkup
 
 Handler = Callable[[Message], Awaitable[None]]
 ChatId = Union[int, str]
@@ -93,15 +92,16 @@ class Node:
         parse_mode: Optional[str] = "HTML",
         reply_markup: Optional[InlineKeyboardMarkup] = None,
     ) -> "BotApp":
-        action = self._app.action_edit_caption(
-            new_caption=new_caption,
-            target=target,
-            message_id=message_id,
-            recipients=recipients,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
+        return self.handle(
+            self._app.action_edit_caption(
+                new_caption=new_caption,
+                target=target,
+                message_id=message_id,
+                recipients=recipients,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
         )
-        return self.handle(action)
 
     def edit_text(
         self,
@@ -113,15 +113,31 @@ class Node:
         parse_mode: Optional[str] = "HTML",
         reply_markup: Optional[InlineKeyboardMarkup] = None,
     ) -> "BotApp":
-        action = self._app.action_edit_text(
-            new_text=new_text,
-            target=target,
-            message_id=message_id,
-            recipients=recipients,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
+        return self.handle(
+            self._app.action_edit_text(
+                new_text=new_text,
+                target=target,
+                message_id=message_id,
+                recipients=recipients,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
         )
-        return self.handle(action)
+
+    def forward_message(
+        self,
+        *,
+        recipients: Iterable[ChatId],
+        silent: bool = False,
+        protect: bool = False,
+    ) -> "BotApp":
+        return self.handle(
+            self._app.action_forward_message(
+                recipients=recipients,
+                silent=silent,
+                protect=protect,
+            )
+        )
 
 
 class BotApp:
@@ -456,6 +472,31 @@ class BotApp:
 
         return _a
 
+    def action_forward_message(
+        self,
+        *,
+        recipients: Iterable[ChatId],
+        silent: bool = False,
+        protect: bool = False,
+    ) -> Handler:
+        rec = list(recipients)
+        if not rec:
+            raise ValueError("recipients must not be empty")
+
+        async def _a(message: Message) -> None:
+            from_chat_id = message.chat.id
+            message_id = message.message_id
+            for to_chat_id in rec:
+                await message.bot.forward_message(
+                    chat_id=to_chat_id,
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    disable_notification=silent,
+                    protect_content=protect,
+                )
+
+        return _a
+
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
 
@@ -512,6 +553,9 @@ class BotApp:
 
     def edit_text(self, name: str, new_text: str, **kwargs) -> None:
         self.node_command(name).edit_text(new_text, **kwargs)
+
+    def forward_message(self, name: str, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> None:
+        self.node_command(name).forward_message(recipients=recipients, silent=silent, protect=protect)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
