@@ -11,6 +11,144 @@ Handler = Callable[[Message], Awaitable[None]]
 ChatId = Union[int, str]
 
 
+class Node:
+    def __init__(self, app: "BotApp", trigger: str, **params) -> None:
+        self._app = app
+        self._trigger = trigger
+        self._params = params
+
+    def handle(self, handler: Handler) -> "BotApp":
+        self._app._register_trigger(self._trigger, handler, **self._params)
+        return self._app
+
+    def send_message(
+        self,
+        text: str,
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> "BotApp":
+        action = self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect)
+        return self.handle(action)
+
+    def send_photo(
+        self,
+        photo: str,
+        caption: str = "",
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+        from_path: bool = False,
+        **extra,
+    ) -> "BotApp":
+        action = self._app.action_send_media(
+            "photo",
+            photo,
+            caption,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+            from_path=from_path,
+            **extra,
+        )
+        return self.handle(action)
+
+    def send_video(
+        self,
+        video: str,
+        caption: str = "",
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+        from_path: bool = False,
+        **extra,
+    ) -> "BotApp":
+        action = self._app.action_send_media(
+            "video",
+            video,
+            caption,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+            from_path=from_path,
+            **extra,
+        )
+        return self.handle(action)
+
+    def send_audio(
+        self,
+        audio: str,
+        caption: str = "",
+        *,
+        performer: str = "",
+        title: str = "",
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+        from_path: bool = False,
+        **extra,
+    ) -> "BotApp":
+        if performer:
+            extra["performer"] = performer
+        if title:
+            extra["title"] = title
+        action = self._app.action_send_media(
+            "audio",
+            audio,
+            caption,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+            from_path=from_path,
+            **extra,
+        )
+        return self.handle(action)
+
+    def send_file(
+        self,
+        file: str,
+        caption: str = "",
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+        from_path: bool = False,
+        **extra,
+    ) -> "BotApp":
+        action = self._app.action_send_media(
+            "document",
+            file,
+            caption,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+            from_path=from_path,
+            **extra,
+        )
+        return self.handle(action)
+
+    def send_location(
+        self,
+        latitude: float,
+        longitude: float,
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> "BotApp":
+        action = self._app.action_send_location(
+            latitude,
+            longitude,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+        )
+        return self.handle(action)
+
+
 class BotApp:
     def __init__(self, token: Optional[str] = None) -> None:
         self.token = token or getenv("BOT_TOKEN")
@@ -28,30 +166,105 @@ class BotApp:
         for chat_id in self._targets(message, recipients):
             await send(chat_id=chat_id, **kwargs)
 
-    def command(
+    def _register_trigger(self, trigger: str, handler: Handler, **params) -> None:
+        t = (trigger or "").strip().lower()
+
+        if t == "command":
+            self.dp.message.register(handler, Command(params["name"]))
+            return
+
+        if t == "any":
+            self.dp.message.register(handler)
+            return
+
+        if t == "kind":
+            kind = (params.get("kind") or "").strip().lower()
+            mapping = {
+                "text": F.text,
+                "location": F.location,
+                "contact": F.contact,
+                "document": F.document,
+                "photo": F.photo,
+                "video": F.video,
+                "audio": F.audio,
+                "sticker": F.sticker,
+            }
+            flt = mapping.get(kind)
+            if flt is None:
+                raise ValueError(f"Unknown kind: {params.get('kind')}")
+            self.dp.message.register(handler, flt)
+            return
+
+        if t == "text":
+            flt = self._build_text_filter(params.get("filter", "any"), params.get("value"))
+            if flt is None:
+                self.dp.message.register(handler, F.text)
+            else:
+                self.dp.message.register(handler, F.text, flt)
+            return
+
+        raise ValueError(f"Unknown trigger: {trigger}")
+
+    def _build_text_filter(self, filter: str, value: Optional[str]):
+        op = (filter or "any").strip().lower()
+
+        if op == "any":
+            return None
+
+        if op == "equal":
+            if value is None:
+                raise ValueError("value is required for filter='equal'")
+            return F.text == value
+
+        if op == "contains":
+            if value is None:
+                raise ValueError("value is required for filter='contains'")
+            return F.text.contains(value)
+
+        if op in ("not_contains", "not-contains"):
+            if value is None:
+                raise ValueError("value is required for filter='not_contains'")
+            return ~F.text.contains(value)
+
+        if op in ("starts", "starts_with", "starts-with"):
+            if value is None:
+                raise ValueError("value is required for filter='starts'")
+            return F.text.startswith(value)
+
+        if op == "regex":
+            if value is None:
+                raise ValueError("value is required for filter='regex'")
+            return F.text.regexp(value)
+
+        if op == "command":
+            if value is None:
+                raise ValueError("value is required for filter='command'")
+            return Command(value.lstrip("/"))
+
+        raise ValueError(f"Unknown text filter: {filter}")
+
+    def action_send_message(
         self,
-        name: str,
-        reply_text: str,
+        text: str,
         *,
         recipients: Optional[Iterable[ChatId]] = None,
         silent: bool = False,
         protect: bool = False,
-    ) -> None:
-        async def _handler(message: Message) -> None:
+    ) -> Handler:
+        async def _action(message: Message) -> None:
             await self._send_to_many(
                 message,
                 recipients,
                 message.bot.send_message,
-                text=reply_text,
+                text=text,
                 disable_notification=silent,
                 protect_content=protect,
             )
 
-        self.dp.message.register(_handler, Command(name))
+        return _action
 
-    def media_command(
+    def action_send_media(
         self,
-        name: str,
         kind: str,
         media: str,
         caption: str = "",
@@ -61,23 +274,20 @@ class BotApp:
         protect: bool = False,
         from_path: bool = False,
         **extra,
-    ) -> None:
+    ) -> Handler:
         k = (kind or "").strip().lower()
         methods = {
             "photo": ("send_photo", "photo"),
-            "rasm": ("send_photo", "photo"),
             "video": ("send_video", "video"),
             "audio": ("send_audio", "audio"),
             "document": ("send_document", "document"),
-            "file": ("send_document", "document"),
-            "hujjat": ("send_document", "document"),
             "animation": ("send_animation", "animation"),
         }
         if k not in methods:
             raise ValueError(f"Unknown media kind: {kind}")
         method_name, arg_name = methods[k]
 
-        async def _handler(message: Message) -> None:
+        async def _action(message: Message) -> None:
             send = getattr(message.bot, method_name)
             payload = {
                 arg_name: self._maybe_file(media, from_path),
@@ -89,186 +299,79 @@ class BotApp:
                 payload["caption"] = caption
             await self._send_to_many(message, recipients, send, **payload)
 
-        self.dp.message.register(_handler, Command(name))
+        return _action
 
-    def photo_command(
+    def action_send_location(
         self,
-        name: str,
-        photo: str,
-        caption: str = "",
+        latitude: float,
+        longitude: float,
         *,
         recipients: Optional[Iterable[ChatId]] = None,
         silent: bool = False,
         protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> None:
-        self.media_command(
-            name,
-            "photo",
-            photo,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
+    ) -> Handler:
+        async def _action(message: Message) -> None:
+            await self._send_to_many(
+                message,
+                recipients,
+                message.bot.send_location,
+                latitude=latitude,
+                longitude=longitude,
+                disable_notification=silent,
+                protect_content=protect,
+            )
 
-    def video_command(
+        return _action
+
+    def node_command(self, name: str) -> Node:
+        return Node(self, "command", name=name)
+
+    def node_any(self) -> Node:
+        return Node(self, "any")
+
+    def node_kind(self, kind: str) -> Node:
+        return Node(self, "kind", kind=kind)
+
+    def node_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
+        return Node(self, "text", filter=filter, value=value)
+
+    def command(
         self,
         name: str,
-        video: str,
-        caption: str = "",
+        reply_text: Optional[str] = None,
         *,
         recipients: Optional[Iterable[ChatId]] = None,
         silent: bool = False,
         protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> None:
-        self.media_command(
-            name,
-            "video",
-            video,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
-
-    def audio_command(
-        self,
-        name: str,
-        audio: str,
-        caption: str = "",
-        *,
-        performer: str = "",
-        title: str = "",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> None:
-        if performer:
-            extra["performer"] = performer
-        if title:
-            extra["title"] = title
-
-        self.media_command(
-            name,
-            "audio",
-            audio,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
-
-    def file_command(
-        self,
-        name: str,
-        file: str,
-        caption: str = "",
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> None:
-        self.media_command(
-            name,
-            "document",
-            file,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
+    ):
+        if reply_text is None:
+            return self.node_command(name)
+        self.node_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
+        return None
 
     def any(self, handler: Handler) -> None:
-        self.dp.message.register(handler)
+        self._register_trigger("any", handler)
 
     def on(self, kind: str, handler: Handler) -> None:
-        k = (kind or "").strip().lower()
-        if k in ("har qanday", "har_qanday", "any"):
-            self.dp.message.register(handler)
-            return
+        self._register_trigger("kind", handler, kind=kind)
 
-        mapping = {
-            "matn": F.text,
-            "text": F.text,
-            "joylashuv": F.location,
-            "location": F.location,
-            "kontakt": F.contact,
-            "contact": F.contact,
-            "telefon": F.contact,
-            "hujjat": F.document,
-            "document": F.document,
-            "rasm": F.photo,
-            "photo": F.photo,
-            "video": F.video,
-            "audio": F.audio,
-            "stiker": F.sticker,
-            "sticker": F.sticker,
-        }
-        flt = mapping.get(k)
-        if flt is None:
-            raise ValueError(f"Unknown kind: {kind}")
-        self.dp.message.register(handler, flt)
+    def on_text(self, handler: Handler, filter: str = "any", value: Optional[str] = None) -> None:
+        self._register_trigger("text", handler, filter=filter, value=value)
 
-    def on_text(self, handler: Handler, filter: str = "har qanday", value: Optional[str] = None) -> None:
-        flt = self._build_text_filter(filter, value)
-        if flt is None:
-            self.dp.message.register(handler, F.text)
-        else:
-            self.dp.message.register(handler, F.text, flt)
+    def send_photo(self, name: str, photo: str, caption: str = "", **kwargs) -> None:
+        self.node_command(name).send_photo(photo, caption, **kwargs)
 
-    def _build_text_filter(self, filter: str, value: Optional[str]):
-        op = (filter or "").strip().lower()
+    def send_video(self, name: str, video: str, caption: str = "", **kwargs) -> None:
+        self.node_command(name).send_video(video, caption, **kwargs)
 
-        if op in ("har qanday", "har_qanday", "any"):
-            return None
+    def send_audio(self, name: str, audio: str, caption: str = "", **kwargs) -> None:
+        self.node_command(name).send_audio(audio, caption, **kwargs)
 
-        if op in ("teng", "equal"):
-            if value is None:
-                raise ValueError("value is required for 'teng'")
-            return F.text == value
+    def send_file(self, name: str, file: str, caption: str = "", **kwargs) -> None:
+        self.node_command(name).send_file(file, caption, **kwargs)
 
-        if op in ("ichida", "contains"):
-            if value is None:
-                raise ValueError("value is required for 'ichida'")
-            return F.text.contains(value)
-
-        if op in ("ichida emas", "ichida_emas", "not_contains"):
-            if value is None:
-                raise ValueError("value is required for 'ichida emas'")
-            return ~F.text.contains(value)
-
-        if op in ("boshlanadi", "starts", "starts_with"):
-            if value is None:
-                raise ValueError("value is required for 'boshlanadi'")
-            return F.text.startswith(value)
-
-        if op in ("regex",):
-            if value is None:
-                raise ValueError("value is required for 'regex'")
-            return F.text.regexp(value)
-
-        if op in ("buyruq", "command"):
-            if value is None:
-                raise ValueError("value is required for 'buyruq'")
-            return Command(value.lstrip("/"))
-
-        raise ValueError(f"Unknown text filter: {filter}")
+    def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
+        self.node_command(name).send_location(latitude, longitude, **kwargs)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
