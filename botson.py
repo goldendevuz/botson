@@ -135,9 +135,16 @@ class Node:
         message_id: Optional[int] = None,
         recipients: Optional[Iterable[ChatId]] = None,
     ) -> "BotApp":
-        return self.handle(
-            self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients)
-        )
+        return self.handle(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
+
+    def show_activity(
+        self,
+        *,
+        activity: str = "typing",
+        seconds: int = 5,
+        recipients: Optional[Iterable[ChatId]] = None,
+    ) -> "BotApp":
+        return self.handle(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
 
 
 class BotApp:
@@ -170,6 +177,18 @@ class BotApp:
         "bowling": "🎳",
         "slot": "🎰",
         "slot_machine": "🎰",
+    }
+
+    _CHAT_ACTION = {
+        "typing": "typing",
+        "upload_photo": "upload_photo",
+        "upload_video": "upload_video",
+        "upload_audio": "upload_audio",
+        "upload_document": "upload_document",
+        "find_location": "find_location",
+        "record_video": "record_video",
+        "record_voice": "record_voice",
+        "record_audio": "record_audio",
     }
 
     def __init__(self, token: Optional[str] = None) -> None:
@@ -491,13 +510,7 @@ class BotApp:
 
         return _a
 
-    def action_delete_message(
-        self,
-        *,
-        target: DeleteTarget = "context",
-        message_id: Optional[int] = None,
-        recipients: Optional[Iterable[ChatId]] = None,
-    ) -> Handler:
+    def action_delete_message(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> Handler:
         if target == "message_id" and message_id is None:
             raise ValueError("message_id is required when target='message_id'")
 
@@ -506,6 +519,24 @@ class BotApp:
             mid = message_id if target == "message_id" else message.message_id
             for chat_id in chat_ids:
                 await message.bot.delete_message(chat_id=chat_id, message_id=mid)
+
+        return _a
+
+    def action_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> Handler:
+        key = (activity or "typing").strip().lower()
+        action = self._CHAT_ACTION.get(key)
+        if not action:
+            raise ValueError(f"Unknown activity: {activity}")
+
+        async def _a(message: Message) -> None:
+            chat_ids = list(recipients) if recipients else [message.chat.id]
+            total = max(1, int(seconds))
+            interval = 4
+            steps = max(1, (total + interval - 1) // interval)
+            for _ in range(steps):
+                for chat_id in chat_ids:
+                    await message.bot.send_chat_action(chat_id=chat_id, action=action)
+                await asyncio.sleep(interval)
 
         return _a
 
@@ -571,6 +602,9 @@ class BotApp:
 
     def delete_message(self, name: str, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> None:
         self.node_command(name).delete_message(target=target, message_id=message_id, recipients=recipients)
+
+    def show_activity(self, name: str, *, activity: str = "typing", seconds: int = 5, recipients=None) -> None:
+        self.node_command(name).show_activity(activity=activity, seconds=seconds, recipients=recipients)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
