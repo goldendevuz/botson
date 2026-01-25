@@ -1,13 +1,23 @@
 import asyncio
+from dataclasses import dataclass
 from os import getenv
 from typing import Awaitable, Callable, Iterable, Optional, Union
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.types.input_file import FSInputFile
 
 Handler = Callable[[Message], Awaitable[None]]
 ChatId = Union[int, str]
+
+
+@dataclass(frozen=True)
+class Opt:
+    recipients: Optional[Iterable[ChatId]] = None
+    silent: bool = False
+    protect: bool = False
+    from_path: bool = False
 
 
 class BotApp:
@@ -17,32 +27,101 @@ class BotApp:
             raise RuntimeError("BOT_TOKEN is not set")
         self.dp = Dispatcher()
 
-    def command(
+    def opt(
         self,
-        name: str,
-        reply_text: str,
         *,
         recipients: Optional[Iterable[ChatId]] = None,
         silent: bool = False,
         protect: bool = False,
-    ) -> None:
+        from_path: bool = False,
+    ) -> Opt:
+        return Opt(
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+            from_path=from_path,
+        )
+
+    def _targets(self, message: Message, opt: Opt) -> list[ChatId]:
+        return list(opt.recipients) if opt.recipients else [message.chat.id]
+
+    def _src(self, src: str, opt: Opt):
+        return FSInputFile(src) if opt.from_path else src
+
+    async def _send_many(self, message: Message, opt: Opt, send, **payload) -> None:
+        for chat_id in self._targets(message, opt):
+            await send(chat_id=chat_id, **payload)
+
+    def command(self, name: str, reply_text: str, *, opt: Optional[Opt] = None) -> None:
+        o = opt or Opt()
+
         async def _handler(message: Message) -> None:
-            targets = list(recipients) if recipients else [message.chat.id]
-            for chat_id in targets:
-                await message.bot.send_message(
-                    chat_id=chat_id,
-                    text=reply_text,
-                    disable_notification=silent,
-                    protect_content=protect,
-                )
+            await self._send_many(
+                message,
+                o,
+                message.bot.send_message,
+                text=reply_text,
+                disable_notification=o.silent,
+                protect_content=o.protect,
+            )
 
         self.dp.message.register(_handler, Command(name))
+
+    def media_command(
+        self,
+        name: str,
+        kind: str,
+        media: str,
+        caption: str = "",
+        *,
+        opt: Optional[Opt] = None,
+    ) -> None:
+        o = opt or Opt()
+
+        kinds = {
+            "photo": ("send_photo", "photo"),
+            "rasm": ("send_photo", "photo"),
+            "video": ("send_video", "video"),
+            "audio": ("send_audio", "audio"),
+            "document": ("send_document", "document"),
+            "hujjat": ("send_document", "document"),
+            "animation": ("send_animation", "animation"),
+        }
+
+        if kind not in kinds:
+            raise ValueError(f"Unknown media kind: {kind}")
+
+        method, arg = kinds[kind]
+
+        async def _handler(message: Message) -> None:
+            payload = {
+                arg: self._src(media, o),
+                "disable_notification": o.silent,
+                "protect_content": o.protect,
+            }
+            if caption:
+                payload["caption"] = caption
+
+            await self._send_many(
+                message,
+                o,
+                getattr(message.bot, method),
+                **payload,
+            )
+
+        self.dp.message.register(_handler, Command(name))
+
+    def photo_command(self, name: str, photo: str, caption: str = "", *, opt: Optional[Opt] = None) -> None:
+        self.media_command(name, "photo", photo, caption, opt=opt)
+
+    def video_command(self, name: str, video: str, caption: str = "", *, opt: Optional[Opt] = None) -> None:
+        self.media_command(name, "video", video, caption, opt=opt)
 
     def any(self, handler: Handler) -> None:
         self.dp.message.register(handler)
 
     def on(self, kind: str, handler: Handler) -> None:
-        k = (kind or "").strip().lower()
+        k = (kind or "").lower()
 
         if k in ("har qanday", "har_qanday", "any"):
             self.dp.message.register(handler)
@@ -71,56 +150,6 @@ class BotApp:
             raise ValueError(f"Unknown kind: {kind}")
 
         self.dp.message.register(handler, flt)
-
-    def on_text(
-        self,
-        handler: Handler,
-        filter: str = "har qanday",
-        value: Optional[str] = None,
-    ) -> None:
-        flt = self._build_text_filter(filter, value)
-        if flt is None:
-            self.dp.message.register(handler, F.text)
-        else:
-            self.dp.message.register(handler, F.text, flt)
-
-    def _build_text_filter(self, filter: str, value: Optional[str]):
-        op = (filter or "").strip().lower()
-
-        if op in ("har qanday", "har_qanday", "any"):
-            return None
-
-        if op in ("teng", "equal"):
-            if value is None:
-                raise ValueError("value is required for 'teng'")
-            return F.text == value
-
-        if op in ("ichida", "contains"):
-            if value is None:
-                raise ValueError("value is required for 'ichida'")
-            return F.text.contains(value)
-
-        if op in ("ichida emas", "ichida_emas", "not_contains"):
-            if value is None:
-                raise ValueError("value is required for 'ichida emas'")
-            return ~F.text.contains(value)
-
-        if op in ("boshlanadi", "starts", "starts_with"):
-            if value is None:
-                raise ValueError("value is required for 'boshlanadi'")
-            return F.text.startswith(value)
-
-        if op in ("regex",):
-            if value is None:
-                raise ValueError("value is required for 'regex'")
-            return F.text.regexp(value)
-
-        if op in ("buyruq", "command"):
-            if value is None:
-                raise ValueError("value is required for 'buyruq'")
-            return Command(value.lstrip("/"))
-
-        raise ValueError(f"Unknown text filter: {filter}")
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
