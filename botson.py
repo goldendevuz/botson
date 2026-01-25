@@ -75,6 +75,12 @@ class Node:
     def send_sticker(self, sticker: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_sticker(sticker=sticker, **opts))
 
+    def send_dice(self, *, emoji: str = "🎲", **opts) -> "BotApp":
+        return self.handle(self._app.action_send_dice(emoji=emoji, **opts))
+
+    def send_game(self, *, game_type: str = "dice", **opts) -> "BotApp":
+        return self.handle(self._app.action_send_game(game_type=game_type, **opts))
+
 
 class BotApp:
     _KIND_FILTERS = {
@@ -94,6 +100,18 @@ class BotApp:
         "audio": ("send_audio", "audio"),
         "document": ("send_document", "document"),
         "animation": ("send_animation", "animation"),
+    }
+
+    _GAME_EMOJI = {
+        "dice": "🎲",
+        "cube": "🎲",
+        "darts": "🎯",
+        "basketball": "🏀",
+        "football": "⚽",
+        "soccer": "⚽",
+        "bowling": "🎳",
+        "slot": "🎰",
+        "slot_machine": "🎰",
     }
 
     def __init__(self, token: Optional[str] = None) -> None:
@@ -278,7 +296,6 @@ class BotApp:
                 payload["last_name"] = last_name
             if vcard:
                 payload["vcard"] = vcard
-
             await self._send_to_many(message, recipients, message.bot.send_contact, **payload)
 
         return _a
@@ -345,6 +362,41 @@ class BotApp:
 
         return _a
 
+    def action_send_dice(
+        self,
+        *,
+        emoji: str = "🎲",
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> Handler:
+        async def _a(message: Message) -> None:
+            await self._send_to_many(
+                message,
+                recipients,
+                message.bot.send_dice,
+                emoji=emoji,
+                disable_notification=silent,
+                protect_content=protect,
+            )
+
+        return _a
+
+    def action_send_game(
+        self,
+        *,
+        game_type: str = "dice",
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> Handler:
+        key = (game_type or "dice").strip().lower()
+        emoji = self._GAME_EMOJI.get(key)
+        if not emoji:
+            raise ValueError(f"Unknown game_type: {game_type}")
+
+        return self.action_send_dice(emoji=emoji, recipients=recipients, silent=silent, protect=protect)
+
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
 
@@ -405,6 +457,12 @@ class BotApp:
 
     def send_sticker(self, name: str, sticker: str, **kwargs) -> None:
         self.node_command(name).send_sticker(sticker, **kwargs)
+
+    def send_dice(self, name: str, *, emoji: str = "🎲", **kwargs) -> None:
+        self.node_command(name).send_dice(emoji=emoji, **kwargs)
+
+    def send_game(self, name: str, *, game_type: str = "dice", **kwargs) -> None:
+        self.node_command(name).send_game(game_type=game_type, **kwargs)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
