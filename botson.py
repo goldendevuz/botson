@@ -10,6 +10,7 @@ from aiogram.types.input_file import FSInputFile
 Handler = Callable[[Message], Awaitable[None]]
 ChatId = Union[int, str]
 EditTarget = Literal["previous", "message_id"]
+DeleteTarget = Literal["context", "message_id"]
 
 
 class Node:
@@ -124,19 +125,18 @@ class Node:
             )
         )
 
-    def forward_message(
+    def forward_message(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
+        return self.handle(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
+
+    def delete_message(
         self,
         *,
-        recipients: Iterable[ChatId],
-        silent: bool = False,
-        protect: bool = False,
+        target: DeleteTarget = "context",
+        message_id: Optional[int] = None,
+        recipients: Optional[Iterable[ChatId]] = None,
     ) -> "BotApp":
         return self.handle(
-            self._app.action_forward_message(
-                recipients=recipients,
-                silent=silent,
-                protect=protect,
-            )
+            self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients)
         )
 
 
@@ -472,13 +472,7 @@ class BotApp:
 
         return _a
 
-    def action_forward_message(
-        self,
-        *,
-        recipients: Iterable[ChatId],
-        silent: bool = False,
-        protect: bool = False,
-    ) -> Handler:
+    def action_forward_message(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> Handler:
         rec = list(recipients)
         if not rec:
             raise ValueError("recipients must not be empty")
@@ -494,6 +488,24 @@ class BotApp:
                     disable_notification=silent,
                     protect_content=protect,
                 )
+
+        return _a
+
+    def action_delete_message(
+        self,
+        *,
+        target: DeleteTarget = "context",
+        message_id: Optional[int] = None,
+        recipients: Optional[Iterable[ChatId]] = None,
+    ) -> Handler:
+        if target == "message_id" and message_id is None:
+            raise ValueError("message_id is required when target='message_id'")
+
+        async def _a(message: Message) -> None:
+            chat_ids = list(recipients) if recipients else [message.chat.id]
+            mid = message_id if target == "message_id" else message.message_id
+            for chat_id in chat_ids:
+                await message.bot.delete_message(chat_id=chat_id, message_id=mid)
 
         return _a
 
@@ -556,6 +568,9 @@ class BotApp:
 
     def forward_message(self, name: str, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> None:
         self.node_command(name).forward_message(recipients=recipients, silent=silent, protect=protect)
+
+    def delete_message(self, name: str, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> None:
+        self.node_command(name).delete_message(target=target, message_id=message_id, recipients=recipients)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
