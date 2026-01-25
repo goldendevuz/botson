@@ -1,5 +1,7 @@
 import asyncio
+from dataclasses import dataclass
 from os import getenv
+from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Literal
 
 from aiogram import Bot, Dispatcher, F
@@ -11,6 +13,19 @@ Handler = Callable[[Message], Awaitable[None]]
 ChatId = Union[int, str]
 EditTarget = Literal["previous", "message_id"]
 DeleteTarget = Literal["context", "message_id"]
+FileKind = Literal["photo", "video", "audio", "document", "voice", "animation", "sticker", "any"]
+
+
+@dataclass(frozen=True)
+class DownloadedFile:
+    file_id: str
+    file_unique_id: str
+    file_path: str
+    local_path: str
+    kind: str
+
+
+AfterDownload = Callable[[DownloadedFile], None]
 
 
 class Node:
@@ -146,6 +161,16 @@ class Node:
     ) -> "BotApp":
         return self.handle(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
 
+    def download_file(
+        self,
+        *,
+        kind: FileKind = "any",
+        to_dir: str = "downloads",
+        filename: str = "",
+        on_done: Optional[AfterDownload] = None,
+    ) -> "BotApp":
+        return self.handle(self._app.action_download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done))
+
 
 class BotApp:
     _KIND_FILTERS = {
@@ -157,6 +182,8 @@ class BotApp:
         "video": F.video,
         "audio": F.audio,
         "sticker": F.sticker,
+        "voice": F.voice,
+        "animation": F.animation,
     }
 
     _MEDIA_METHODS = {
@@ -540,6 +567,81 @@ class BotApp:
 
         return _a
 
+    def _extract_file(self, message: Message, kind: FileKind):
+        if kind == "photo" or (kind == "any" and message.photo):
+            p = message.photo[-1]
+            return ("photo", p.file_id, p.file_unique_id)
+
+        if kind == "video" or (kind == "any" and message.video):
+            v = message.video
+            return ("video", v.file_id, v.file_unique_id)
+
+        if kind == "audio" or (kind == "any" and message.audio):
+            a = message.audio
+            return ("audio", a.file_id, a.file_unique_id)
+
+        if kind == "document" or (kind == "any" and message.document):
+            d = message.document
+            return ("document", d.file_id, d.file_unique_id)
+
+        if kind == "voice" or (kind == "any" and message.voice):
+            v = message.voice
+            return ("voice", v.file_id, v.file_unique_id)
+
+        if kind == "animation" or (kind == "any" and message.animation):
+            a = message.animation
+            return ("animation", a.file_id, a.file_unique_id)
+
+        if kind == "sticker" or (kind == "any" and message.sticker):
+            s = message.sticker
+            return ("sticker", s.file_id, s.file_unique_id)
+
+        return None
+
+    def action_download_file(
+        self,
+        *,
+        kind: FileKind = "any",
+        to_dir: str = "downloads",
+        filename: str = "",
+        on_done: Optional[AfterDownload] = None,
+    ) -> Handler:
+        k = (kind or "any").strip().lower()
+        if k not in ("photo", "video", "audio", "document", "voice", "animation", "sticker", "any"):
+            raise ValueError(f"Unknown kind: {kind}")
+
+        async def _a(message: Message) -> None:
+            info = self._extract_file(message, k)  # (kind, file_id, file_unique_id)
+            if info is None:
+                return
+
+            file_kind, file_id, file_unique_id = info
+            tg_file = await message.bot.get_file(file_id)
+
+            out_dir = Path(to_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if filename:
+                out_path = out_dir / filename
+            else:
+                suffix = Path(tg_file.file_path).suffix
+                out_path = out_dir / f"{file_kind}_{file_unique_id}{suffix}"
+
+            await message.bot.download_file(tg_file.file_path, destination=str(out_path))
+
+            if on_done:
+                on_done(
+                    DownloadedFile(
+                        file_id=file_id,
+                        file_unique_id=file_unique_id,
+                        file_path=tg_file.file_path,
+                        local_path=str(out_path),
+                        kind=file_kind,
+                    )
+                )
+
+        return _a
+
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
 
@@ -558,53 +660,8 @@ class BotApp:
         self.node_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
         return None
 
-    def send_photo(self, name: str, photo: str, caption: str = "", **kwargs) -> None:
-        self.node_command(name).send_photo(photo, caption, **kwargs)
-
-    def send_video(self, name: str, video: str, caption: str = "", **kwargs) -> None:
-        self.node_command(name).send_video(video, caption, **kwargs)
-
-    def send_audio(self, name: str, audio: str, caption: str = "", **kwargs) -> None:
-        self.node_command(name).send_audio(audio, caption, **kwargs)
-
-    def send_file(self, name: str, file: str, caption: str = "", **kwargs) -> None:
-        self.node_command(name).send_file(file, caption, **kwargs)
-
-    def send_animation(self, name: str, animation: str, caption: str = "", **kwargs) -> None:
-        self.node_command(name).send_animation(animation, caption, **kwargs)
-
-    def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
-        self.node_command(name).send_location(latitude, longitude, **kwargs)
-
-    def send_contact(self, name: str, phone_number: str, first_name: str, last_name: str = "", vcard: str = "", **kwargs) -> None:
-        self.node_command(name).send_contact(phone_number, first_name, last_name=last_name, vcard=vcard, **kwargs)
-
-    def send_poll(self, name: str, question: str, options: Sequence[str], **kwargs) -> None:
-        self.node_command(name).send_poll(question, options, **kwargs)
-
-    def send_sticker(self, name: str, sticker: str, **kwargs) -> None:
-        self.node_command(name).send_sticker(sticker, **kwargs)
-
-    def send_dice(self, name: str, *, emoji: str = "🎲", **kwargs) -> None:
-        self.node_command(name).send_dice(emoji=emoji, **kwargs)
-
-    def send_game(self, name: str, *, game_type: str = "dice", **kwargs) -> None:
-        self.node_command(name).send_game(game_type=game_type, **kwargs)
-
-    def edit_caption(self, name: str, new_caption: str, **kwargs) -> None:
-        self.node_command(name).edit_caption(new_caption, **kwargs)
-
-    def edit_text(self, name: str, new_text: str, **kwargs) -> None:
-        self.node_command(name).edit_text(new_text, **kwargs)
-
-    def forward_message(self, name: str, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> None:
-        self.node_command(name).forward_message(recipients=recipients, silent=silent, protect=protect)
-
-    def delete_message(self, name: str, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> None:
-        self.node_command(name).delete_message(target=target, message_id=message_id, recipients=recipients)
-
-    def show_activity(self, name: str, *, activity: str = "typing", seconds: int = 5, recipients=None) -> None:
-        self.node_command(name).show_activity(activity=activity, seconds=seconds, recipients=recipients)
+    def download_file(self, name: str, *, kind: FileKind = "any", to_dir: str = "downloads", filename: str = "", on_done: Optional[AfterDownload] = None) -> None:
+        self.node_command(name).download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
