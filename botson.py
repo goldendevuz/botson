@@ -1,14 +1,16 @@
 import asyncio
 from os import getenv
-from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union
+from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Literal
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.types.input_file import FSInputFile
+from aiogram.types import InlineKeyboardMarkup
 
 Handler = Callable[[Message], Awaitable[None]]
 ChatId = Union[int, str]
+EditTarget = Literal["previous", "message_id"]
 
 
 class Node:
@@ -80,6 +82,46 @@ class Node:
 
     def send_game(self, *, game_type: str = "dice", **opts) -> "BotApp":
         return self.handle(self._app.action_send_game(game_type=game_type, **opts))
+
+    def edit_caption(
+        self,
+        new_caption: str,
+        *,
+        target: EditTarget = "previous",
+        message_id: Optional[int] = None,
+        recipients: Optional[Iterable[ChatId]] = None,
+        parse_mode: Optional[str] = "HTML",
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> "BotApp":
+        action = self._app.action_edit_caption(
+            new_caption=new_caption,
+            target=target,
+            message_id=message_id,
+            recipients=recipients,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
+        return self.handle(action)
+
+    def edit_text(
+        self,
+        new_text: str,
+        *,
+        target: EditTarget = "previous",
+        message_id: Optional[int] = None,
+        recipients: Optional[Iterable[ChatId]] = None,
+        parse_mode: Optional[str] = "HTML",
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> "BotApp":
+        action = self._app.action_edit_text(
+            new_text=new_text,
+            target=target,
+            message_id=message_id,
+            recipients=recipients,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
+        return self.handle(action)
 
 
 class BotApp:
@@ -200,14 +242,7 @@ class BotApp:
 
         raise ValueError(f"Unknown text filter: {filter}")
 
-    def action_send_message(
-        self,
-        text: str,
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> Handler:
+    def action_send_message(self, text: str, *, recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
             await self._send_to_many(
                 message,
@@ -226,10 +261,10 @@ class BotApp:
         media: str,
         caption: str = "",
         *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
+        recipients=None,
+        silent=False,
+        protect=False,
+        from_path=False,
         **extra,
     ) -> Handler:
         k = (kind or "").strip().lower()
@@ -252,15 +287,7 @@ class BotApp:
 
         return _a
 
-    def action_send_location(
-        self,
-        *,
-        latitude: float,
-        longitude: float,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> Handler:
+    def action_send_location(self, *, latitude: float, longitude: float, recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
             await self._send_to_many(
                 message,
@@ -281,9 +308,9 @@ class BotApp:
         first_name: str,
         last_name: str = "",
         vcard: str = "",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
+        recipients=None,
+        silent=False,
+        protect=False,
     ) -> Handler:
         async def _a(message: Message) -> None:
             payload = {
@@ -311,9 +338,9 @@ class BotApp:
         open_period: Optional[int] = None,
         correct_option_id: Optional[int] = None,
         explanation: str = "",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
+        recipients=None,
+        silent=False,
+        protect=False,
     ) -> Handler:
         pt = (poll_type or "regular").strip().lower()
         pt = "quiz" if pt in ("quiz", "test") else "regular"
@@ -342,14 +369,7 @@ class BotApp:
 
         return _a
 
-    def action_send_sticker(
-        self,
-        *,
-        sticker: str,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> Handler:
+    def action_send_sticker(self, *, sticker: str, recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
             await self._send_to_many(
                 message,
@@ -362,14 +382,7 @@ class BotApp:
 
         return _a
 
-    def action_send_dice(
-        self,
-        *,
-        emoji: str = "🎲",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> Handler:
+    def action_send_dice(self, *, emoji: str = "🎲", recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
             await self._send_to_many(
                 message,
@@ -382,20 +395,66 @@ class BotApp:
 
         return _a
 
-    def action_send_game(
-        self,
-        *,
-        game_type: str = "dice",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> Handler:
+    def action_send_game(self, *, game_type: str = "dice", recipients=None, silent=False, protect=False) -> Handler:
         key = (game_type or "dice").strip().lower()
         emoji = self._GAME_EMOJI.get(key)
         if not emoji:
             raise ValueError(f"Unknown game_type: {game_type}")
-
         return self.action_send_dice(emoji=emoji, recipients=recipients, silent=silent, protect=protect)
+
+    def action_edit_caption(
+        self,
+        *,
+        new_caption: str,
+        target: EditTarget = "previous",
+        message_id: Optional[int] = None,
+        recipients: Optional[Iterable[ChatId]] = None,
+        parse_mode: Optional[str] = "HTML",
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Handler:
+        if target == "message_id" and message_id is None:
+            raise ValueError("message_id is required when target='message_id'")
+
+        async def _a(message: Message) -> None:
+            chat_ids = list(recipients) if recipients else [message.chat.id]
+            mid = message_id if target == "message_id" else message.message_id - 1
+            for chat_id in chat_ids:
+                await message.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    caption=new_caption,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+
+        return _a
+
+    def action_edit_text(
+        self,
+        *,
+        new_text: str,
+        target: EditTarget = "previous",
+        message_id: Optional[int] = None,
+        recipients: Optional[Iterable[ChatId]] = None,
+        parse_mode: Optional[str] = "HTML",
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Handler:
+        if target == "message_id" and message_id is None:
+            raise ValueError("message_id is required when target='message_id'")
+
+        async def _a(message: Message) -> None:
+            chat_ids = list(recipients) if recipients else [message.chat.id]
+            mid = message_id if target == "message_id" else message.message_id - 1
+            for chat_id in chat_ids:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    text=new_text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+
+        return _a
 
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
@@ -409,15 +468,7 @@ class BotApp:
     def node_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
         return Node(self, "text", filter=filter, value=value)
 
-    def command(
-        self,
-        name: str,
-        reply_text: Optional[str] = None,
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ):
+    def command(self, name: str, reply_text: Optional[str] = None, *, recipients=None, silent=False, protect=False):
         if reply_text is None:
             return self.node_command(name)
         self.node_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
@@ -441,15 +492,7 @@ class BotApp:
     def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
         self.node_command(name).send_location(latitude, longitude, **kwargs)
 
-    def send_contact(
-        self,
-        name: str,
-        phone_number: str,
-        first_name: str,
-        last_name: str = "",
-        vcard: str = "",
-        **kwargs,
-    ) -> None:
+    def send_contact(self, name: str, phone_number: str, first_name: str, last_name: str = "", vcard: str = "", **kwargs) -> None:
         self.node_command(name).send_contact(phone_number, first_name, last_name=last_name, vcard=vcard, **kwargs)
 
     def send_poll(self, name: str, question: str, options: Sequence[str], **kwargs) -> None:
@@ -463,6 +506,12 @@ class BotApp:
 
     def send_game(self, name: str, *, game_type: str = "dice", **kwargs) -> None:
         self.node_command(name).send_game(game_type=game_type, **kwargs)
+
+    def edit_caption(self, name: str, new_caption: str, **kwargs) -> None:
+        self.node_command(name).edit_caption(new_caption, **kwargs)
+
+    def edit_text(self, name: str, new_text: str, **kwargs) -> None:
+        self.node_command(name).edit_text(new_text, **kwargs)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
