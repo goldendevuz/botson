@@ -1,6 +1,6 @@
 import asyncio
 from os import getenv
-from typing import Awaitable, Callable, Iterable, Optional, Union
+from typing import Awaitable, Callable, Iterable, Optional, Union, Sequence
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -164,6 +164,36 @@ class Node:
             first_name=first_name,
             last_name=last_name,
             vcard=vcard,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+        )
+        return self.handle(action)
+
+    def send_poll(
+        self,
+        question: str,
+        options: Sequence[str],
+        *,
+        poll_type: str = "regular",
+        anonymous: bool = True,
+        multiple_answers: bool = False,
+        open_period: Optional[int] = None,
+        correct_option_id: Optional[int] = None,
+        explanation: str = "",
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> "BotApp":
+        action = self._app.action_send_poll(
+            question=question,
+            options=options,
+            poll_type=poll_type,
+            anonymous=anonymous,
+            multiple_answers=multiple_answers,
+            open_period=open_period,
+            correct_option_id=correct_option_id,
+            explanation=explanation,
             recipients=recipients,
             silent=silent,
             protect=protect,
@@ -372,6 +402,51 @@ class BotApp:
 
         return _action
 
+    def action_send_poll(
+        self,
+        *,
+        question: str,
+        options: Sequence[str],
+        poll_type: str = "regular",
+        anonymous: bool = True,
+        multiple_answers: bool = False,
+        open_period: Optional[int] = None,
+        correct_option_id: Optional[int] = None,
+        explanation: str = "",
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> Handler:
+        pt = (poll_type or "regular").strip().lower()
+        if pt in ("quiz", "test"):
+            pt = "quiz"
+        else:
+            pt = "regular"
+
+        async def _action(message: Message) -> None:
+            payload = {
+                "question": question,
+                "options": list(options),
+                "type": pt,
+                "is_anonymous": anonymous,
+                "allows_multiple_answers": multiple_answers,
+                "disable_notification": silent,
+                "protect_content": protect,
+            }
+
+            if open_period is not None:
+                payload["open_period"] = int(open_period)
+
+            if pt == "quiz":
+                if correct_option_id is not None:
+                    payload["correct_option_id"] = int(correct_option_id)
+                if explanation:
+                    payload["explanation"] = explanation
+
+            await self._send_to_many(message, recipients, message.bot.send_poll, **payload)
+
+        return _action
+
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
 
@@ -432,6 +507,15 @@ class BotApp:
         **kwargs,
     ) -> None:
         self.node_command(name).send_contact(phone_number, first_name, last_name, vcard, **kwargs)
+
+    def send_poll(
+        self,
+        name: str,
+        question: str,
+        options: Sequence[str],
+        **kwargs,
+    ) -> None:
+        self.node_command(name).send_poll(question, options, **kwargs)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
