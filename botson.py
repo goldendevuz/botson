@@ -1,6 +1,6 @@
 import asyncio
 from os import getenv
-from typing import Awaitable, Callable, Iterable, Optional, Union, Sequence
+from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -21,187 +21,81 @@ class Node:
         self._app._register_trigger(self._trigger, handler, **self._params)
         return self._app
 
-    def send_message(
-        self,
-        text: str,
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> "BotApp":
-        action = self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect)
-        return self.handle(action)
+    def send_message(self, text: str, **opts) -> "BotApp":
+        return self.handle(self._app.action_send_message(text, **opts))
 
-    def send_photo(
-        self,
-        photo: str,
-        caption: str = "",
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> "BotApp":
-        action = self._app.action_send_media(
-            "photo",
-            photo,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
-        return self.handle(action)
+    def send_media(self, kind: str, media: str, caption: str = "", **opts) -> "BotApp":
+        return self.handle(self._app.action_send_media(kind, media, caption, **opts))
 
-    def send_video(
-        self,
-        video: str,
-        caption: str = "",
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> "BotApp":
-        action = self._app.action_send_media(
-            "video",
-            video,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
-        return self.handle(action)
+    def send_photo(self, photo: str, caption: str = "", **opts) -> "BotApp":
+        return self.send_media("photo", photo, caption, **opts)
 
-    def send_audio(
-        self,
-        audio: str,
-        caption: str = "",
-        *,
-        performer: str = "",
-        title: str = "",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> "BotApp":
+    def send_video(self, video: str, caption: str = "", **opts) -> "BotApp":
+        return self.send_media("video", video, caption, **opts)
+
+    def send_audio(self, audio: str, caption: str = "", *, performer: str = "", title: str = "", **opts) -> "BotApp":
+        extra = dict(opts)
         if performer:
             extra["performer"] = performer
         if title:
             extra["title"] = title
-        action = self._app.action_send_media(
-            "audio",
-            audio,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
-        return self.handle(action)
+        return self.send_media("audio", audio, caption, **extra)
 
-    def send_file(
-        self,
-        file: str,
-        caption: str = "",
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-        from_path: bool = False,
-        **extra,
-    ) -> "BotApp":
-        action = self._app.action_send_media(
-            "document",
-            file,
-            caption,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-            from_path=from_path,
-            **extra,
-        )
-        return self.handle(action)
+    def send_file(self, file: str, caption: str = "", **opts) -> "BotApp":
+        return self.send_media("document", file, caption, **opts)
 
-    def send_location(
-        self,
-        latitude: float,
-        longitude: float,
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> "BotApp":
-        action = self._app.action_send_location(
-            latitude,
-            longitude,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-        )
-        return self.handle(action)
+    def send_animation(self, animation: str, caption: str = "", **opts) -> "BotApp":
+        return self.send_media("animation", animation, caption, **opts)
+
+    def send_location(self, latitude: float, longitude: float, **opts) -> "BotApp":
+        return self.handle(self._app.action_send_location(latitude=latitude, longitude=longitude, **opts))
 
     def send_contact(
         self,
         phone_number: str,
         first_name: str,
+        *,
         last_name: str = "",
         vcard: str = "",
-        *,
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
+        **opts,
     ) -> "BotApp":
-        action = self._app.action_send_contact(
-            phone_number=phone_number,
-            first_name=first_name,
-            last_name=last_name,
-            vcard=vcard,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
+        return self.handle(
+            self._app.action_send_contact(
+                phone_number=phone_number,
+                first_name=first_name,
+                last_name=last_name,
+                vcard=vcard,
+                **opts,
+            )
         )
-        return self.handle(action)
 
-    def send_poll(
-        self,
-        question: str,
-        options: Sequence[str],
-        *,
-        poll_type: str = "regular",
-        anonymous: bool = True,
-        multiple_answers: bool = False,
-        open_period: Optional[int] = None,
-        correct_option_id: Optional[int] = None,
-        explanation: str = "",
-        recipients: Optional[Iterable[ChatId]] = None,
-        silent: bool = False,
-        protect: bool = False,
-    ) -> "BotApp":
-        action = self._app.action_send_poll(
-            question=question,
-            options=options,
-            poll_type=poll_type,
-            anonymous=anonymous,
-            multiple_answers=multiple_answers,
-            open_period=open_period,
-            correct_option_id=correct_option_id,
-            explanation=explanation,
-            recipients=recipients,
-            silent=silent,
-            protect=protect,
-        )
-        return self.handle(action)
+    def send_poll(self, question: str, options: Sequence[str], **opts) -> "BotApp":
+        return self.handle(self._app.action_send_poll(question=question, options=options, **opts))
+
+    def send_sticker(self, sticker: str, **opts) -> "BotApp":
+        return self.handle(self._app.action_send_sticker(sticker=sticker, **opts))
 
 
 class BotApp:
+    _KIND_FILTERS = {
+        "text": F.text,
+        "location": F.location,
+        "contact": F.contact,
+        "document": F.document,
+        "photo": F.photo,
+        "video": F.video,
+        "audio": F.audio,
+        "sticker": F.sticker,
+    }
+
+    _MEDIA_METHODS = {
+        "photo": ("send_photo", "photo"),
+        "video": ("send_video", "video"),
+        "audio": ("send_audio", "audio"),
+        "document": ("send_document", "document"),
+        "animation": ("send_animation", "animation"),
+    }
+
     def __init__(self, token: Optional[str] = None) -> None:
         self.token = token or getenv("BOT_TOKEN")
         if not self.token:
@@ -211,7 +105,7 @@ class BotApp:
     def _targets(self, message: Message, recipients: Optional[Iterable[ChatId]]) -> list[ChatId]:
         return list(recipients) if recipients else [message.chat.id]
 
-    def _maybe_file(self, src: str, from_path: bool):
+    def _file(self, src: str, from_path: bool):
         return FSInputFile(src) if from_path else src
 
     async def _send_to_many(self, message: Message, recipients: Optional[Iterable[ChatId]], send, **kwargs) -> None:
@@ -222,7 +116,10 @@ class BotApp:
         t = (trigger or "").strip().lower()
 
         if t == "command":
-            self.dp.message.register(handler, Command(params["name"]))
+            name = params.get("name")
+            if not name:
+                raise ValueError("command trigger requires name")
+            self.dp.message.register(handler, Command(str(name)))
             return
 
         if t == "any":
@@ -231,17 +128,7 @@ class BotApp:
 
         if t == "kind":
             kind = (params.get("kind") or "").strip().lower()
-            mapping = {
-                "text": F.text,
-                "location": F.location,
-                "contact": F.contact,
-                "document": F.document,
-                "photo": F.photo,
-                "video": F.video,
-                "audio": F.audio,
-                "sticker": F.sticker,
-            }
-            flt = mapping.get(kind)
+            flt = self._KIND_FILTERS.get(kind)
             if flt is None:
                 raise ValueError(f"Unknown kind: {params.get('kind')}")
             self.dp.message.register(handler, flt)
@@ -303,7 +190,7 @@ class BotApp:
         silent: bool = False,
         protect: bool = False,
     ) -> Handler:
-        async def _action(message: Message) -> None:
+        async def _a(message: Message) -> None:
             await self._send_to_many(
                 message,
                 recipients,
@@ -313,7 +200,7 @@ class BotApp:
                 protect_content=protect,
             )
 
-        return _action
+        return _a
 
     def action_send_media(
         self,
@@ -328,21 +215,15 @@ class BotApp:
         **extra,
     ) -> Handler:
         k = (kind or "").strip().lower()
-        methods = {
-            "photo": ("send_photo", "photo"),
-            "video": ("send_video", "video"),
-            "audio": ("send_audio", "audio"),
-            "document": ("send_document", "document"),
-            "animation": ("send_animation", "animation"),
-        }
-        if k not in methods:
+        spec = self._MEDIA_METHODS.get(k)
+        if spec is None:
             raise ValueError(f"Unknown media kind: {kind}")
-        method_name, arg_name = methods[k]
+        method_name, arg_name = spec
 
-        async def _action(message: Message) -> None:
+        async def _a(message: Message) -> None:
             send = getattr(message.bot, method_name)
             payload = {
-                arg_name: self._maybe_file(media, from_path),
+                arg_name: self._file(media, from_path),
                 "disable_notification": silent,
                 "protect_content": protect,
                 **extra,
@@ -351,18 +232,18 @@ class BotApp:
                 payload["caption"] = caption
             await self._send_to_many(message, recipients, send, **payload)
 
-        return _action
+        return _a
 
     def action_send_location(
         self,
+        *,
         latitude: float,
         longitude: float,
-        *,
         recipients: Optional[Iterable[ChatId]] = None,
         silent: bool = False,
         protect: bool = False,
     ) -> Handler:
-        async def _action(message: Message) -> None:
+        async def _a(message: Message) -> None:
             await self._send_to_many(
                 message,
                 recipients,
@@ -373,7 +254,7 @@ class BotApp:
                 protect_content=protect,
             )
 
-        return _action
+        return _a
 
     def action_send_contact(
         self,
@@ -386,7 +267,7 @@ class BotApp:
         silent: bool = False,
         protect: bool = False,
     ) -> Handler:
-        async def _action(message: Message) -> None:
+        async def _a(message: Message) -> None:
             payload = {
                 "phone_number": phone_number,
                 "first_name": first_name,
@@ -400,7 +281,7 @@ class BotApp:
 
             await self._send_to_many(message, recipients, message.bot.send_contact, **payload)
 
-        return _action
+        return _a
 
     def action_send_poll(
         self,
@@ -418,12 +299,9 @@ class BotApp:
         protect: bool = False,
     ) -> Handler:
         pt = (poll_type or "regular").strip().lower()
-        if pt in ("quiz", "test"):
-            pt = "quiz"
-        else:
-            pt = "regular"
+        pt = "quiz" if pt in ("quiz", "test") else "regular"
 
-        async def _action(message: Message) -> None:
+        async def _a(message: Message) -> None:
             payload = {
                 "question": question,
                 "options": list(options),
@@ -445,7 +323,27 @@ class BotApp:
 
             await self._send_to_many(message, recipients, message.bot.send_poll, **payload)
 
-        return _action
+        return _a
+
+    def action_send_sticker(
+        self,
+        *,
+        sticker: str,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> Handler:
+        async def _a(message: Message) -> None:
+            await self._send_to_many(
+                message,
+                recipients,
+                message.bot.send_sticker,
+                sticker=sticker,
+                disable_notification=silent,
+                protect_content=protect,
+            )
+
+        return _a
 
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
@@ -473,15 +371,6 @@ class BotApp:
         self.node_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
         return None
 
-    def any(self, handler: Handler) -> None:
-        self._register_trigger("any", handler)
-
-    def on(self, kind: str, handler: Handler) -> None:
-        self._register_trigger("kind", handler, kind=kind)
-
-    def on_text(self, handler: Handler, filter: str = "any", value: Optional[str] = None) -> None:
-        self._register_trigger("text", handler, filter=filter, value=value)
-
     def send_photo(self, name: str, photo: str, caption: str = "", **kwargs) -> None:
         self.node_command(name).send_photo(photo, caption, **kwargs)
 
@@ -493,6 +382,9 @@ class BotApp:
 
     def send_file(self, name: str, file: str, caption: str = "", **kwargs) -> None:
         self.node_command(name).send_file(file, caption, **kwargs)
+
+    def send_animation(self, name: str, animation: str, caption: str = "", **kwargs) -> None:
+        self.node_command(name).send_animation(animation, caption, **kwargs)
 
     def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
         self.node_command(name).send_location(latitude, longitude, **kwargs)
@@ -506,16 +398,13 @@ class BotApp:
         vcard: str = "",
         **kwargs,
     ) -> None:
-        self.node_command(name).send_contact(phone_number, first_name, last_name, vcard, **kwargs)
+        self.node_command(name).send_contact(phone_number, first_name, last_name=last_name, vcard=vcard, **kwargs)
 
-    def send_poll(
-        self,
-        name: str,
-        question: str,
-        options: Sequence[str],
-        **kwargs,
-    ) -> None:
+    def send_poll(self, name: str, question: str, options: Sequence[str], **kwargs) -> None:
         self.node_command(name).send_poll(question, options, **kwargs)
+
+    def send_sticker(self, name: str, sticker: str, **kwargs) -> None:
+        self.node_command(name).send_sticker(sticker, **kwargs)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
