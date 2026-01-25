@@ -148,6 +148,28 @@ class Node:
         )
         return self.handle(action)
 
+    def send_contact(
+        self,
+        phone_number: str,
+        first_name: str,
+        last_name: str = "",
+        vcard: str = "",
+        *,
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> "BotApp":
+        action = self._app.action_send_contact(
+            phone_number=phone_number,
+            first_name=first_name,
+            last_name=last_name,
+            vcard=vcard,
+            recipients=recipients,
+            silent=silent,
+            protect=protect,
+        )
+        return self.handle(action)
+
 
 class BotApp:
     def __init__(self, token: Optional[str] = None) -> None:
@@ -323,6 +345,33 @@ class BotApp:
 
         return _action
 
+    def action_send_contact(
+        self,
+        *,
+        phone_number: str,
+        first_name: str,
+        last_name: str = "",
+        vcard: str = "",
+        recipients: Optional[Iterable[ChatId]] = None,
+        silent: bool = False,
+        protect: bool = False,
+    ) -> Handler:
+        async def _action(message: Message) -> None:
+            payload = {
+                "phone_number": phone_number,
+                "first_name": first_name,
+                "disable_notification": silent,
+                "protect_content": protect,
+            }
+            if last_name:
+                payload["last_name"] = last_name
+            if vcard:
+                payload["vcard"] = vcard
+
+            await self._send_to_many(message, recipients, message.bot.send_contact, **payload)
+
+        return _action
+
     def node_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
 
@@ -372,6 +421,17 @@ class BotApp:
 
     def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
         self.node_command(name).send_location(latitude, longitude, **kwargs)
+
+    def send_contact(
+        self,
+        name: str,
+        phone_number: str,
+        first_name: str,
+        last_name: str = "",
+        vcard: str = "",
+        **kwargs,
+    ) -> None:
+        self.node_command(name).send_contact(phone_number, first_name, last_name, vcard, **kwargs)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
