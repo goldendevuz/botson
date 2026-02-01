@@ -1,5 +1,6 @@
 import asyncio
 import random
+import time
 from dataclasses import dataclass
 from os import getenv
 from pathlib import Path
@@ -42,8 +43,7 @@ def _is_command(message: Message, name: str) -> bool:
     t = _text(message).strip()
     if not t.startswith("/"):
         return False
-    cmd = t.split()[0][1:]
-    cmd = cmd.split("@")[0]
+    cmd = t.split()[0][1:].split("@")[0]
     return cmd == name.lstrip("/")
 
 
@@ -186,6 +186,83 @@ class IfBuilder:
         return self._app
 
 
+class MembershipBuilder:
+    def __init__(self, app: "BotApp", trigger: str, params: dict, chat: ChatId, ttl: int, allow_restricted: bool) -> None:
+        self._app = app
+        self._trigger = trigger
+        self._params = params
+        self._chat = chat
+        self._ttl = int(ttl)
+        self._allow_restricted = bool(allow_restricted)
+        self._then_chain: list[Handler] = []
+        self._else_chain: list[Handler] = []
+
+    def then(self, handler: Handler) -> "MembershipBuilder":
+        self._then_chain.append(handler)
+        return self
+
+    def then_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "MembershipBuilder":
+        return self.then(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def then_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "MembershipBuilder":
+        return self.then(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
+
+    def then_delay(self, seconds: int) -> "MembershipBuilder":
+        async def _a(_: Message) -> None:
+            await _delay(seconds)
+        return self.then(_a)
+
+    def then_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "MembershipBuilder":
+        return self.then(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
+
+    def then_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "MembershipBuilder":
+        return self.then(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
+
+    def then_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "MembershipBuilder":
+        return self.then(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
+
+    def else_(self, handler: Handler) -> "BotApp":
+        self._else_chain.append(handler)
+        return self.done()
+
+    def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
+        return self.else_(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def else_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "BotApp":
+        return self.else_(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
+
+    def else_delay(self, seconds: int) -> "MembershipBuilder":
+        async def _a(_: Message) -> None:
+            await _delay(seconds)
+        self._else_chain.append(_a)
+        return self
+
+    def else_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "BotApp":
+        return self.else_(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
+
+    def else_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "BotApp":
+        return self.else_(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
+
+    def else_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
+        return self.else_(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
+
+    def done(self) -> "BotApp":
+        then_chain = list(self._then_chain)
+        else_chain = list(self._else_chain)
+        chat = self._chat
+        ttl = self._ttl
+        allow_restricted = self._allow_restricted
+
+        async def _handler(message: Message) -> None:
+            ok = await self._app._is_member_cached(message.bot, chat, message.from_user.id, ttl=ttl, allow_restricted=allow_restricted)
+            chain = then_chain if ok else else_chain
+            for h in chain:
+                await h(message)
+
+        self._app._register_trigger(self._trigger, _handler, **self._params)
+        return self._app
+
+
 class Node:
     def __init__(self, app: "BotApp", trigger: str, **params) -> None:
         self._app = app
@@ -224,6 +301,9 @@ class Node:
     def if_command(self, name: str) -> IfBuilder:
         n = name
         return self.if_(lambda m: _is_command(m, n))
+
+    def check_membership(self, chat: ChatId, *, ttl: int = 60, allow_restricted: bool = True) -> MembershipBuilder:
+        return MembershipBuilder(self._app, self._trigger, dict(self._params), chat=chat, ttl=ttl, allow_restricted=allow_restricted)
 
     def send_message(self, text: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_message(text, **opts))
@@ -428,6 +508,7 @@ class BotApp:
         if not self.token:
             raise RuntimeError("BOT_TOKEN is not set")
         self.dp = Dispatcher()
+        self._member_cache: dict[tuple[str, int], tuple[bool, float]] = {}
 
     def _targets(self, message: Message, recipients: Optional[Iterable[ChatId]]) -> list[ChatId]:
         return list(recipients) if recipients else [message.chat.id]
@@ -509,6 +590,45 @@ class BotApp:
 
         raise ValueError(f"Unknown text filter: {filter}")
 
+    def _member_cache_key(self, chat: ChatId, user_id: int) -> tuple[str, int]:
+        return (str(chat), int(user_id))
+
+    def member_cache_clear(self) -> None:
+        self._member_cache.clear()
+
+    def member_cache_drop(self, chat: ChatId, user_id: int) -> None:
+        self._member_cache.pop(self._member_cache_key(chat, user_id), None)
+
+    async def _is_member_cached(self, bot: Bot, chat: ChatId, user_id: int, *, ttl: int, allow_restricted: bool) -> bool:
+        key = self._member_cache_key(chat, user_id)
+        now = time.monotonic()
+        hit = self._member_cache.get(key)
+        if hit:
+            ok, exp = hit
+            if exp > now:
+                return ok
+
+        ok = False
+        try:
+            cm = await bot.get_chat_member(chat_id=chat, user_id=user_id)
+            status = getattr(cm, "status", None)
+
+            if status in ("creator", "administrator", "member"):
+                ok = True
+            elif status == "restricted":
+                if allow_restricted:
+                    ok = bool(getattr(cm, "is_member", True))
+                else:
+                    ok = False
+            else:
+                ok = False
+        except Exception:
+            ok = False
+
+        exp = now + max(1, int(ttl))
+        self._member_cache[key] = (ok, exp)
+        return ok
+
     def action_send_message(self, text: str, *, recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
             await self._send_to_many(
@@ -522,9 +642,8 @@ class BotApp:
         return _a
 
     def action_random_send_message(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> Handler:
-        picked = _pick_text(texts)
-
         async def _a(message: Message) -> None:
+            picked = _pick_text(texts)
             await self._send_to_many(
                 message,
                 recipients,
@@ -880,57 +999,6 @@ class BotApp:
 
     def random_command(self, name: str, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> None:
         self.on_command(name).random_send(texts, recipients=recipients, silent=silent, protect=protect)
-
-    def send_photo(self, name: str, photo: str, caption: str = "", **kwargs) -> None:
-        self.on_command(name).send_photo(photo, caption, **kwargs)
-
-    def send_video(self, name: str, video: str, caption: str = "", **kwargs) -> None:
-        self.on_command(name).send_video(video, caption, **kwargs)
-
-    def send_audio(self, name: str, audio: str, caption: str = "", **kwargs) -> None:
-        self.on_command(name).send_audio(audio, caption, **kwargs)
-
-    def send_file(self, name: str, file: str, caption: str = "", **kwargs) -> None:
-        self.on_command(name).send_file(file, caption, **kwargs)
-
-    def send_animation(self, name: str, animation: str, caption: str = "", **kwargs) -> None:
-        self.on_command(name).send_animation(animation, caption, **kwargs)
-
-    def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
-        self.on_command(name).send_location(latitude, longitude, **kwargs)
-
-    def send_contact(self, name: str, phone_number: str, first_name: str, last_name: str = "", vcard: str = "", **kwargs) -> None:
-        self.on_command(name).send_contact(phone_number, first_name, last_name=last_name, vcard=vcard, **kwargs)
-
-    def send_poll(self, name: str, question: str, options: Sequence[str], **kwargs) -> None:
-        self.on_command(name).send_poll(question, options, **kwargs)
-
-    def send_sticker(self, name: str, sticker: str, **kwargs) -> None:
-        self.on_command(name).send_sticker(sticker, **kwargs)
-
-    def send_dice(self, name: str, *, emoji: str = "🎲", **kwargs) -> None:
-        self.on_command(name).send_dice(emoji=emoji, **kwargs)
-
-    def send_game(self, name: str, *, game_type: str = "dice", **kwargs) -> None:
-        self.on_command(name).send_game(game_type=game_type, **kwargs)
-
-    def edit_caption(self, name: str, new_caption: str, **kwargs) -> None:
-        self.on_command(name).edit_caption(new_caption, **kwargs)
-
-    def edit_text(self, name: str, new_text: str, **kwargs) -> None:
-        self.on_command(name).edit_text(new_text, **kwargs)
-
-    def forward_message(self, name: str, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> None:
-        self.on_command(name).forward_message(recipients=recipients, silent=silent, protect=protect)
-
-    def delete_message(self, name: str, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> None:
-        self.on_command(name).delete_message(target=target, message_id=message_id, recipients=recipients)
-
-    def show_activity(self, name: str, *, activity: str = "typing", seconds: int = 5, recipients=None) -> None:
-        self.on_command(name).show_activity(activity=activity, seconds=seconds, recipients=recipients)
-
-    def download_file(self, name: str, *, kind: FileKind = "any", to_dir: str = "downloads", filename: str = "", on_done: Optional[AfterDownload] = None) -> None:
-        self.on_command(name).download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
