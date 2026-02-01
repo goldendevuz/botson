@@ -1,22 +1,27 @@
 import asyncio
+import json as _json
 import random
 import time
 from dataclasses import dataclass
 from os import getenv
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Literal, Any
+from typing import Any, Awaitable, Callable, Iterable, Optional, Sequence, Union, Literal
 
+import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.types.input_file import FSInputFile
 
-Handler = Callable[[Message], Awaitable[None]]
-CBHandler = Callable[[CallbackQuery], Awaitable[None]]
 ChatId = Union[int, str]
 EditTarget = Literal["previous", "message_id"]
 DeleteTarget = Literal["context", "message_id"]
 FileKind = Literal["photo", "video", "audio", "document", "voice", "animation", "sticker", "any"]
+
+HandlerLike = Callable[[Message], Any]
+CBHandlerLike = Callable[[CallbackQuery], Any]
+Handler = Callable[[Message], Awaitable[None]]
+CBHandler = Callable[[CallbackQuery], Awaitable[None]]
 Predicate = Callable[[Message], bool]
 
 
@@ -30,6 +35,16 @@ class DownloadedFile:
 
 
 AfterDownload = Callable[[DownloadedFile], None]
+
+
+@dataclass(frozen=True)
+class HttpResult:
+    status: int
+    headers: dict[str, str]
+    text: str
+    json: Any
+    url: str
+    method: str
 
 
 def _has_text(message: Message) -> bool:
@@ -108,6 +123,61 @@ def _ctx_user_id(ctx: Any) -> int:
     if msg is not None and getattr(msg, "from_user", None) is not None:
         return int(msg.from_user.id)
     raise RuntimeError("Context has no user id")
+
+
+def _is_awaitable(x: Any) -> bool:
+    return hasattr(x, "__await__")
+
+
+async def _run_user_callable(fn: Callable[[Any], Any], ctx: Any) -> None:
+    out = fn(ctx)
+    if _is_awaitable(out):
+        await out
+
+
+def _wrap_message_handler(fn: HandlerLike) -> Handler:
+    async def _h(message: Message) -> None:
+        await _run_user_callable(fn, message)
+    return _h
+
+
+def _wrap_callback_handler(fn: CBHandlerLike) -> CBHandler:
+    async def _h(cb: CallbackQuery) -> None:
+        await _run_user_callable(fn, cb)
+    return _h
+
+
+def _json_pick(obj: Any, path: str, default: Any = "") -> Any:
+    if obj is None:
+        return default
+    p = (path or "").strip()
+    if not p:
+        return default
+    if p.startswith("$."):
+        p = p[2:]
+    if p.startswith("$"):
+        p = p[1:]
+    if p.startswith("."):
+        p = p[1:]
+    if not p:
+        return default
+    cur = obj
+    for part in p.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, dict):
+            cur = cur.get(part, default)
+        elif isinstance(cur, list):
+            try:
+                i = int(part)
+            except Exception:
+                return default
+            if i < 0 or i >= len(cur):
+                return default
+            cur = cur[i]
+        else:
+            return default
+    return cur
 
 
 class StateStore:
@@ -207,6 +277,34 @@ class StateAPI:
         return _a
 
 
+class HttpStore:
+    def __init__(self) -> None:
+        self._data: dict[tuple[int, int], HttpResult] = {}
+
+    def _key(self, ctx: Any) -> tuple[int, int]:
+        return (_ctx_chat_id(ctx), _ctx_user_id(ctx))
+
+    def set(self, ctx: Any, result: HttpResult) -> None:
+        self._data[self._key(ctx)] = result
+
+    def get(self, ctx: Any) -> Optional[HttpResult]:
+        return self._data.get(self._key(ctx))
+
+    def drop(self, ctx: Any) -> None:
+        self._data.pop(self._key(ctx), None)
+
+
+class HttpAPI:
+    def __init__(self, store: HttpStore) -> None:
+        self._s = store
+
+    def last(self, ctx: Any) -> Optional[HttpResult]:
+        return self._s.get(ctx)
+
+    def clear(self, ctx: Any) -> None:
+        self._s.drop(ctx)
+
+
 class IfBuilder:
     def __init__(self, app: "BotApp", trigger: str, params: dict, first_pred: Predicate) -> None:
         self._app = app
@@ -215,50 +313,25 @@ class IfBuilder:
         self._branches: list[tuple[Predicate, list[Handler]]] = [(first_pred, [])]
         self._else_chain: list[Handler] = []
 
-    def then(self, handler: Handler) -> "IfBuilder":
-        self._branches[-1][1].append(handler)
+    def then(self, handler: HandlerLike) -> "IfBuilder":
+        self._branches[-1][1].append(_wrap_message_handler(handler))
         return self
 
     def then_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "IfBuilder":
         return self.then(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
 
-    def then_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "IfBuilder":
-        return self.then(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
-
     def then_delay(self, seconds: int) -> "IfBuilder":
         async def _a(_: Message) -> None:
             await _delay(seconds)
-        return self.then(_a)
+        self._branches[-1][1].append(_a)
+        return self
 
     def elif_(self, pred: Predicate) -> "IfBuilder":
         self._branches.append((pred, []))
         return self
 
-    def elif_text_equals(self, value: str) -> "IfBuilder":
-        v = value
-        return self.elif_(lambda m: _has_text(m) and _text(m) == v)
-
-    def elif_text_contains(self, value: str) -> "IfBuilder":
-        v = value
-        return self.elif_(lambda m: _has_text(m) and v in _text(m))
-
-    def elif_text_starts(self, value: str) -> "IfBuilder":
-        v = value
-        return self.elif_(lambda m: _has_text(m) and _text(m).startswith(v))
-
-    def elif_text_regex(self, pattern: str) -> "IfBuilder":
-        p = pattern
-        return self.elif_(lambda m: _has_text(m) and bool(F.text.regexp(p).resolve(m)))
-
-    def elif_kind(self, kind: str) -> "IfBuilder":
-        return self.elif_(_kind_pred(kind))
-
-    def elif_command(self, name: str) -> "IfBuilder":
-        n = name
-        return self.elif_(lambda m: _is_command(m, n))
-
-    def else_(self, handler: Handler) -> "BotApp":
-        self._else_chain.append(handler)
+    def else_(self, handler: HandlerLike) -> "BotApp":
+        self._else_chain.append(_wrap_message_handler(handler))
         return self.done()
 
     def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
@@ -281,14 +354,137 @@ class IfBuilder:
         return self._app
 
 
+class HttpChain:
+    def __init__(
+        self,
+        app: "BotApp",
+        trigger: str,
+        params: dict,
+        method: str,
+        url: Union[str, Callable[[Any], str]],
+        *,
+        params_q: Optional[Union[dict[str, Any], Callable[[Any], dict[str, Any]]]] = None,
+        headers: Optional[Union[dict[str, str], Callable[[Any], dict[str, str]]]] = None,
+        json_body: Optional[Union[dict[str, Any], list[Any], str, Callable[[Any], Any]]] = None,
+        data: Optional[Union[dict[str, Any], str, bytes, Callable[[Any], Any]]] = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._app = app
+        self._trigger = trigger
+        self._params = params
+        self._method = str(method).upper()
+        self._url = url
+        self._params_q = params_q
+        self._headers = headers
+        self._json_body = json_body
+        self._data = data
+        self._timeout = float(timeout)
+        self._steps: list[Callable[[Message, HttpResult], Awaitable[None]]] = []
+
+    def then(self, fn: Callable[[Any, HttpResult], Any]) -> "HttpChain":
+        async def _s(message: Message, result: HttpResult) -> None:
+            out = fn(message, result)
+            if _is_awaitable(out):
+                await out
+        self._steps.append(_s)
+        return self
+
+    def then_send_text(self, text: Union[str, Callable[[Any, HttpResult], str]]) -> "HttpChain":
+        async def _s(message: Message, result: HttpResult) -> None:
+            t = text(message, result) if callable(text) else str(text)
+            await message.answer(t)
+        self._steps.append(_s)
+        return self
+
+    def then_send_json(self, path: str, default: str = "") -> "HttpChain":
+        async def _s(message: Message, result: HttpResult) -> None:
+            v = _json_pick(result.json, path, default)
+            if isinstance(v, (dict, list)):
+                t = _json.dumps(v, ensure_ascii=False)
+            else:
+                t = str(v)
+            await message.answer(t)
+        self._steps.append(_s)
+        return self
+
+    def then_state_set_json(self, key: str, path: str, default: Any = None) -> "HttpChain":
+        async def _s(message: Message, result: HttpResult) -> None:
+            v = _json_pick(result.json, path, default)
+            self._app._state_store.set(message, key, v)
+        self._steps.append(_s)
+        return self
+
+    def done(self) -> "BotApp":
+        method = self._method
+        url = self._url
+        params_q = self._params_q
+        headers = self._headers
+        json_body = self._json_body
+        data = self._data
+        timeout = self._timeout
+        steps = list(self._steps)
+
+        async def _handler(message: Message) -> None:
+            u = url(message) if callable(url) else str(url)
+
+            pq = None
+            if params_q is not None:
+                pq = params_q(message) if callable(params_q) else dict(params_q)
+
+            hd = None
+            if headers is not None:
+                hd = headers(message) if callable(headers) else dict(headers)
+
+            jb = None
+            if json_body is not None:
+                jb = json_body(message) if callable(json_body) else json_body
+
+            dt = None
+            if data is not None:
+                dt = data(message) if callable(data) else data
+
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                resp = await client.request(
+                    method=method,
+                    url=u,
+                    params=pq,
+                    headers=hd,
+                    json=jb,
+                    data=dt,
+                )
+
+            txt = resp.text
+            try:
+                js = resp.json()
+            except Exception:
+                js = None
+
+            result = HttpResult(
+                status=int(resp.status_code),
+                headers={k: v for k, v in resp.headers.items()},
+                text=txt,
+                json=js,
+                url=str(resp.url),
+                method=method,
+            )
+
+            self._app._http_store.set(message, result)
+
+            for s in steps:
+                await s(message, result)
+
+        self._app._register_trigger(self._trigger, _handler, **self._params)
+        return self._app
+
+
 class Node:
     def __init__(self, app: "BotApp", trigger: str, **params) -> None:
         self._app = app
         self._trigger = trigger
         self._params = params
 
-    def handle(self, handler: Handler) -> "BotApp":
-        self._app._register_trigger(self._trigger, handler, **self._params)
+    def handle(self, handler: HandlerLike) -> "BotApp":
+        self._app._register_trigger(self._trigger, _wrap_message_handler(handler), **self._params)
         return self._app
 
     def delay(self, seconds: int) -> "DelayedNode":
@@ -296,29 +492,6 @@ class Node:
 
     def if_(self, pred: Predicate) -> IfBuilder:
         return IfBuilder(self._app, self._trigger, dict(self._params), pred)
-
-    def if_text_equals(self, value: str) -> IfBuilder:
-        v = value
-        return self.if_(lambda m: _has_text(m) and _text(m) == v)
-
-    def if_text_contains(self, value: str) -> IfBuilder:
-        v = value
-        return self.if_(lambda m: _has_text(m) and v in _text(m))
-
-    def if_text_starts(self, value: str) -> IfBuilder:
-        v = value
-        return self.if_(lambda m: _has_text(m) and _text(m).startswith(v))
-
-    def if_text_regex(self, pattern: str) -> IfBuilder:
-        p = pattern
-        return self.if_(lambda m: _has_text(m) and bool(F.text.regexp(p).resolve(m)))
-
-    def if_kind(self, kind: str) -> IfBuilder:
-        return self.if_(_kind_pred(kind))
-
-    def if_command(self, name: str) -> IfBuilder:
-        n = name
-        return self.if_(lambda m: _is_command(m, n))
 
     def send_message(self, text: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_message(text, **opts))
@@ -394,14 +567,38 @@ class Node:
     def state_inc(self, key: str, step: int = 1) -> "BotApp":
         return self.handle(self._app.state.inc(key, step=step))
 
+    def http(
+        self,
+        *,
+        method: str,
+        url: Union[str, Callable[[Any], str]],
+        params: Optional[Union[dict[str, Any], Callable[[Any], dict[str, Any]]]] = None,
+        headers: Optional[Union[dict[str, str], Callable[[Any], dict[str, str]]]] = None,
+        json: Optional[Union[dict[str, Any], list[Any], str, Callable[[Any], Any]]] = None,
+        data: Optional[Union[dict[str, Any], str, bytes, Callable[[Any], Any]]] = None,
+        timeout: float = 10.0,
+    ) -> HttpChain:
+        return HttpChain(
+            self._app,
+            self._trigger,
+            dict(self._params),
+            method,
+            url,
+            params_q=params,
+            headers=headers,
+            json_body=json,
+            data=data,
+            timeout=timeout,
+        )
+
 
 class CallbackNode:
     def __init__(self, app: "BotApp", **params) -> None:
         self._app = app
         self._params = params
 
-    def handle(self, handler: CBHandler) -> "BotApp":
-        self._app._register_callback(handler, **self._params)
+    def handle(self, handler: CBHandlerLike) -> "BotApp":
+        self._app._register_callback(_wrap_callback_handler(handler), **self._params)
         return self._app
 
     def delay(self, seconds: int) -> "CallbackDelayedNode":
@@ -446,12 +643,13 @@ class CallbackDelayedNode(CallbackNode):
         super().__init__(app, **params)
         self._seconds = max(0, int(seconds))
 
-    def handle(self, handler: CBHandler) -> "BotApp":
+    def handle(self, handler: CBHandlerLike) -> "BotApp":
+        h = _wrap_callback_handler(handler)
         seconds = self._seconds
 
         async def _wrapped(cb: CallbackQuery) -> None:
             await _delay(seconds)
-            await handler(cb)
+            await h(cb)
 
         return super().handle(_wrapped)
 
@@ -461,12 +659,13 @@ class DelayedNode(Node):
         super().__init__(app, trigger, **params)
         self._seconds = max(0, int(seconds))
 
-    def handle(self, handler: Handler) -> "BotApp":
+    def handle(self, handler: HandlerLike) -> "BotApp":
+        h = _wrap_message_handler(handler)
         seconds = self._seconds
 
         async def _wrapped(message: Message) -> None:
             await _delay(seconds)
-            await handler(message)
+            await h(message)
 
         return super().handle(_wrapped)
 
@@ -525,6 +724,8 @@ class BotApp:
         self._member_cache: dict[tuple[str, int], tuple[bool, float]] = {}
         self._state_store = StateStore()
         self.state = StateAPI(self._state_store)
+        self._http_store = HttpStore()
+        self.http = HttpAPI(self._http_store)
 
     def _targets(self, message: Message, recipients: Optional[Iterable[ChatId]]) -> list[ChatId]:
         return list(recipients) if recipients else [message.chat.id]
@@ -634,35 +835,6 @@ class BotApp:
             self.dp.callback_query.register(handler)
         else:
             self.dp.callback_query.register(handler, flt)
-
-    def _member_cache_key(self, chat: ChatId, user_id: int) -> tuple[str, int]:
-        return (str(chat), int(user_id))
-
-    async def _is_member_cached(self, bot: Bot, chat: ChatId, user_id: int, *, ttl: int, allow_restricted: bool) -> bool:
-        key = self._member_cache_key(chat, user_id)
-        now = time.monotonic()
-        hit = self._member_cache.get(key)
-        if hit:
-            ok, exp = hit
-            if exp > now:
-                return ok
-
-        ok = False
-        try:
-            cm = await bot.get_chat_member(chat_id=chat, user_id=user_id)
-            status = getattr(cm, "status", None)
-            if status in ("creator", "administrator", "member"):
-                ok = True
-            elif status == "restricted":
-                ok = bool(getattr(cm, "is_member", True)) if allow_restricted else False
-            else:
-                ok = False
-        except Exception:
-            ok = False
-
-        exp = now + max(1, int(ttl))
-        self._member_cache[key] = (ok, exp)
-        return ok
 
     def action_send_message(self, text: str, *, recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
@@ -790,23 +962,6 @@ class BotApp:
             )
         return _a
 
-    def action_edit_caption(self, *, new_caption: str, target: EditTarget = "previous", message_id: Optional[int] = None, recipients: Optional[Iterable[ChatId]] = None, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> Handler:
-        if target == "message_id" and message_id is None:
-            raise ValueError("message_id is required when target='message_id'")
-
-        async def _a(message: Message) -> None:
-            chat_ids = list(recipients) if recipients else [message.chat.id]
-            mid = message_id if target == "message_id" else message.message_id - 1
-            for chat_id in chat_ids:
-                await message.bot.edit_message_caption(
-                    chat_id=chat_id,
-                    message_id=mid,
-                    caption=new_caption,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                )
-        return _a
-
     def action_edit_text(self, *, new_text: str, target: EditTarget = "previous", message_id: Optional[int] = None, recipients: Optional[Iterable[ChatId]] = None, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> Handler:
         if target == "message_id" and message_id is None:
             raise ValueError("message_id is required when target='message_id'")
@@ -819,6 +974,23 @@ class BotApp:
                     chat_id=chat_id,
                     message_id=mid,
                     text=new_text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+        return _a
+
+    def action_edit_caption(self, *, new_caption: str, target: EditTarget = "previous", message_id: Optional[int] = None, recipients: Optional[Iterable[ChatId]] = None, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> Handler:
+        if target == "message_id" and message_id is None:
+            raise ValueError("message_id is required when target='message_id'")
+
+        async def _a(message: Message) -> None:
+            chat_ids = list(recipients) if recipients else [message.chat.id]
+            mid = message_id if target == "message_id" else message.message_id - 1
+            for chat_id in chat_ids:
+                await message.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    caption=new_caption,
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
                 )
