@@ -1,4 +1,5 @@
 import asyncio
+import random
 from dataclasses import dataclass
 from os import getenv
 from pathlib import Path
@@ -77,6 +78,13 @@ async def _delay(seconds: int) -> None:
         await asyncio.sleep(s)
 
 
+def _pick_text(items: Sequence[str]) -> str:
+    seq = [x for x in items if isinstance(x, str) and x.strip()]
+    if not seq:
+        raise ValueError("random_send requires a non-empty list of non-empty strings")
+    return random.choice(seq)
+
+
 class IfBuilder:
     def __init__(self, app: "BotApp", trigger: str, params: dict, first_pred: Predicate) -> None:
         self._app = app
@@ -91,6 +99,9 @@ class IfBuilder:
 
     def then_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "IfBuilder":
         return self.then(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def then_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "IfBuilder":
+        return self.then(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
 
     def then_delay(self, seconds: int) -> "IfBuilder":
         async def _a(_: Message) -> None:
@@ -139,6 +150,9 @@ class IfBuilder:
 
     def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
         return self.else_(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def else_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "BotApp":
+        return self.else_(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
 
     def else_delay(self, seconds: int) -> "IfBuilder":
         async def _a(_: Message) -> None:
@@ -213,6 +227,9 @@ class Node:
 
     def send_message(self, text: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_message(text, **opts))
+
+    def random_send(self, texts: Sequence[str], **opts) -> "BotApp":
+        return self.handle(self._app.action_random_send_message(texts, **opts))
 
     def send_media(self, kind: str, media: str, caption: str = "", **opts) -> "BotApp":
         return self.handle(self._app.action_send_media(kind, media, caption, **opts))
@@ -499,6 +516,20 @@ class BotApp:
                 recipients,
                 message.bot.send_message,
                 text=text,
+                disable_notification=silent,
+                protect_content=protect,
+            )
+        return _a
+
+    def action_random_send_message(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> Handler:
+        picked = _pick_text(texts)
+
+        async def _a(message: Message) -> None:
+            await self._send_to_many(
+                message,
+                recipients,
+                message.bot.send_message,
+                text=picked,
                 disable_notification=silent,
                 protect_content=protect,
             )
@@ -846,6 +877,9 @@ class BotApp:
             return self.on_command(name)
         self.on_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
         return None
+
+    def random_command(self, name: str, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> None:
+        self.on_command(name).random_send(texts, recipients=recipients, silent=silent, protect=protect)
 
     def send_photo(self, name: str, photo: str, caption: str = "", **kwargs) -> None:
         self.on_command(name).send_photo(photo, caption, **kwargs)
