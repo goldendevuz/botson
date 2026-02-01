@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from os import getenv
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Literal
+from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Literal, Any
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -86,12 +86,125 @@ def _pick_text(items: Sequence[str]) -> str:
     return random.choice(seq)
 
 
-def _cb_data(cb: CallbackQuery) -> str:
-    return str(getattr(cb, "data", "") or "")
-
-
 def _cb_message(cb: CallbackQuery) -> Optional[Message]:
     return getattr(cb, "message", None)
+
+
+def _ctx_chat_id(ctx: Any) -> int:
+    chat = getattr(ctx, "chat", None)
+    if chat is not None and getattr(chat, "id", None) is not None:
+        return int(chat.id)
+    msg = getattr(ctx, "message", None)
+    if msg is not None and getattr(msg, "chat", None) is not None:
+        return int(msg.chat.id)
+    raise RuntimeError("Context has no chat id")
+
+
+def _ctx_user_id(ctx: Any) -> int:
+    fu = getattr(ctx, "from_user", None)
+    if fu is not None and getattr(fu, "id", None) is not None:
+        return int(fu.id)
+    msg = getattr(ctx, "message", None)
+    if msg is not None and getattr(msg, "from_user", None) is not None:
+        return int(msg.from_user.id)
+    raise RuntimeError("Context has no user id")
+
+
+class StateStore:
+    def __init__(self) -> None:
+        self._data: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def _key(self, ctx: Any) -> tuple[int, int]:
+        return (_ctx_chat_id(ctx), _ctx_user_id(ctx))
+
+    def get(self, ctx: Any, key: str, default: Any = None) -> Any:
+        return self._data.get(self._key(ctx), {}).get(key, default)
+
+    def all(self, ctx: Any) -> dict[str, Any]:
+        return dict(self._data.get(self._key(ctx), {}))
+
+    def set(self, ctx: Any, key: str, value: Any) -> None:
+        k = self._key(ctx)
+        bucket = self._data.get(k)
+        if bucket is None:
+            bucket = {}
+            self._data[k] = bucket
+        bucket[key] = value
+
+    def drop(self, ctx: Any, key: str) -> None:
+        bucket = self._data.get(self._key(ctx))
+        if not bucket:
+            return
+        bucket.pop(key, None)
+
+    def clear(self, ctx: Any) -> None:
+        self._data.pop(self._key(ctx), None)
+
+    def inc(self, ctx: Any, key: str, step: int = 1) -> int:
+        k = self._key(ctx)
+        bucket = self._data.get(k)
+        if bucket is None:
+            bucket = {}
+            self._data[k] = bucket
+        cur = bucket.get(key, 0)
+        try:
+            cur_i = int(cur)
+        except Exception:
+            cur_i = 0
+        cur_i += int(step)
+        bucket[key] = cur_i
+        return cur_i
+
+
+class StateAPI:
+    def __init__(self, store: StateStore) -> None:
+        self._s = store
+
+    def get(self, ctx: Any, key: str, default: Any = None) -> Any:
+        return self._s.get(ctx, key, default)
+
+    def all(self, ctx: Any) -> dict[str, Any]:
+        return self._s.all(ctx)
+
+    def set(self, key: str, value: Any) -> Handler:
+        async def _a(message: Message) -> None:
+            self._s.set(message, key, value)
+        return _a
+
+    def drop(self, key: str) -> Handler:
+        async def _a(message: Message) -> None:
+            self._s.drop(message, key)
+        return _a
+
+    def clear(self) -> Handler:
+        async def _a(message: Message) -> None:
+            self._s.clear(message)
+        return _a
+
+    def inc(self, key: str, step: int = 1) -> Handler:
+        async def _a(message: Message) -> None:
+            self._s.inc(message, key, step=step)
+        return _a
+
+    def cb_set(self, key: str, value: Any) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            self._s.set(cb, key, value)
+        return _a
+
+    def cb_drop(self, key: str) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            self._s.drop(cb, key)
+        return _a
+
+    def cb_clear(self) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            self._s.clear(cb)
+        return _a
+
+    def cb_inc(self, key: str, step: int = 1) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            self._s.inc(cb, key, step=step)
+        return _a
 
 
 class IfBuilder:
@@ -116,15 +229,6 @@ class IfBuilder:
         async def _a(_: Message) -> None:
             await _delay(seconds)
         return self.then(_a)
-
-    def then_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "IfBuilder":
-        return self.then(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
-
-    def then_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "IfBuilder":
-        return self.then(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
-
-    def then_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "IfBuilder":
-        return self.then(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
 
     def elif_(self, pred: Predicate) -> "IfBuilder":
         self._branches.append((pred, []))
@@ -160,24 +264,6 @@ class IfBuilder:
     def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
         return self.else_(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
 
-    def else_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "BotApp":
-        return self.else_(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
-
-    def else_delay(self, seconds: int) -> "IfBuilder":
-        async def _a(_: Message) -> None:
-            await _delay(seconds)
-        self._else_chain.append(_a)
-        return self
-
-    def else_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "BotApp":
-        return self.else_(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
-
-    def else_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "BotApp":
-        return self.else_(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
-
-    def else_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
-        return self.else_(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
-
     def done(self) -> "BotApp":
         branches = list(self._branches)
         else_chain = list(self._else_chain)
@@ -189,60 +275,6 @@ class IfBuilder:
                         await h(message)
                     return
             for h in else_chain:
-                await h(message)
-
-        self._app._register_trigger(self._trigger, _handler, **self._params)
-        return self._app
-
-
-class MembershipBuilder:
-    def __init__(self, app: "BotApp", trigger: str, params: dict, chat: ChatId, ttl: int, allow_restricted: bool) -> None:
-        self._app = app
-        self._trigger = trigger
-        self._params = params
-        self._chat = chat
-        self._ttl = int(ttl)
-        self._allow_restricted = bool(allow_restricted)
-        self._then_chain: list[Handler] = []
-        self._else_chain: list[Handler] = []
-
-    def then(self, handler: Handler) -> "MembershipBuilder":
-        self._then_chain.append(handler)
-        return self
-
-    def then_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "MembershipBuilder":
-        return self.then(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
-
-    def then_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "MembershipBuilder":
-        return self.then(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
-
-    def else_(self, handler: Handler) -> "BotApp":
-        self._else_chain.append(handler)
-        return self.done()
-
-    def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
-        return self.else_(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
-
-    def else_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "BotApp":
-        return self.else_(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
-
-    def done(self) -> "BotApp":
-        then_chain = list(self._then_chain)
-        else_chain = list(self._else_chain)
-        chat = self._chat
-        ttl = self._ttl
-        allow_restricted = self._allow_restricted
-
-        async def _handler(message: Message) -> None:
-            ok = await self._app._is_member_cached(
-                message.bot,
-                chat,
-                message.from_user.id,
-                ttl=ttl,
-                allow_restricted=allow_restricted,
-            )
-            chain = then_chain if ok else else_chain
-            for h in chain:
                 await h(message)
 
         self._app._register_trigger(self._trigger, _handler, **self._params)
@@ -288,9 +320,6 @@ class Node:
         n = name
         return self.if_(lambda m: _is_command(m, n))
 
-    def check_membership(self, chat: ChatId, *, ttl: int = 60, allow_restricted: bool = True) -> MembershipBuilder:
-        return MembershipBuilder(self._app, self._trigger, dict(self._params), chat=chat, ttl=ttl, allow_restricted=allow_restricted)
-
     def send_message(self, text: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_message(text, **opts))
 
@@ -332,17 +361,14 @@ class Node:
     def send_sticker(self, sticker: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_sticker(sticker=sticker, **opts))
 
-    def send_dice(self, *, emoji: str = "🎲", **opts) -> "BotApp":
-        return self.handle(self._app.action_send_dice(emoji=emoji, **opts))
-
     def send_game(self, *, game_type: str = "dice", **opts) -> "BotApp":
         return self.handle(self._app.action_send_game(game_type=game_type, **opts))
 
-    def edit_caption(self, new_caption: str, **opts) -> "BotApp":
-        return self.handle(self._app.action_edit_caption(new_caption=new_caption, **opts))
-
     def edit_text(self, new_text: str, **opts) -> "BotApp":
         return self.handle(self._app.action_edit_text(new_text=new_text, **opts))
+
+    def edit_caption(self, new_caption: str, **opts) -> "BotApp":
+        return self.handle(self._app.action_edit_caption(new_caption=new_caption, **opts))
 
     def forward_message(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
         return self.handle(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
@@ -355,6 +381,18 @@ class Node:
 
     def download_file(self, **opts) -> "BotApp":
         return self.handle(self._app.action_download_file(**opts))
+
+    def state_set(self, key: str, value: Any) -> "BotApp":
+        return self.handle(self._app.state.set(key, value))
+
+    def state_drop(self, key: str) -> "BotApp":
+        return self.handle(self._app.state.drop(key))
+
+    def state_clear(self) -> "BotApp":
+        return self.handle(self._app.state.clear())
+
+    def state_inc(self, key: str, step: int = 1) -> "BotApp":
+        return self.handle(self._app.state.inc(key, step=step))
 
 
 class CallbackNode:
@@ -389,6 +427,18 @@ class CallbackNode:
 
     def show_activity(self, *, activity: str = "typing", seconds: int = 5) -> "BotApp":
         return self.handle(self._app.action_callback_show_activity(activity=activity, seconds=seconds))
+
+    def state_set(self, key: str, value: Any) -> "BotApp":
+        return self.handle(self._app.state.cb_set(key, value))
+
+    def state_drop(self, key: str) -> "BotApp":
+        return self.handle(self._app.state.cb_drop(key))
+
+    def state_clear(self) -> "BotApp":
+        return self.handle(self._app.state.cb_clear())
+
+    def state_inc(self, key: str, step: int = 1) -> "BotApp":
+        return self.handle(self._app.state.cb_inc(key, step=step))
 
 
 class CallbackDelayedNode(CallbackNode):
@@ -473,6 +523,8 @@ class BotApp:
             raise RuntimeError("BOT_TOKEN is not set")
         self.dp = Dispatcher()
         self._member_cache: dict[tuple[str, int], tuple[bool, float]] = {}
+        self._state_store = StateStore()
+        self.state = StateAPI(self._state_store)
 
     def _targets(self, message: Message, recipients: Optional[Iterable[ChatId]]) -> list[ChatId]:
         return list(recipients) if recipients else [message.chat.id]
@@ -521,37 +573,30 @@ class BotApp:
 
         if op == "any":
             return None
-
         if op == "equal":
             if value is None:
                 raise ValueError("value is required for filter='equal'")
             return F.text == value
-
         if op == "contains":
             if value is None:
                 raise ValueError("value is required for filter='contains'")
             return F.text.contains(value)
-
         if op in ("not_contains", "not-contains"):
             if value is None:
                 raise ValueError("value is required for filter='not_contains'")
             return ~F.text.contains(value)
-
         if op in ("starts", "starts_with", "starts-with"):
             if value is None:
                 raise ValueError("value is required for filter='starts'")
             return F.text.startswith(value)
-
         if op == "regex":
             if value is None:
                 raise ValueError("value is required for filter='regex'")
             return F.text.regexp(value)
-
         if op == "command":
             if value is None:
                 raise ValueError("value is required for filter='command'")
             return Command(value.lstrip("/"))
-
         raise ValueError(f"Unknown text filter: {filter}")
 
     def _build_callback_filter(self, filter: str, value):
@@ -559,34 +604,28 @@ class BotApp:
 
         if op == "any":
             return None
-
         if op in ("equal", "equals", "static"):
             if value is None:
                 raise ValueError("value is required for callback filter='equal'")
             return F.data == str(value)
-
         if op in ("contains", "in"):
             if value is None:
                 raise ValueError("value is required for callback filter='contains'")
             return F.data.contains(str(value))
-
         if op in ("starts", "starts_with", "startswith"):
             if value is None:
                 raise ValueError("value is required for callback filter='starts'")
             return F.data.startswith(str(value))
-
         if op == "regex":
             if value is None:
                 raise ValueError("value is required for callback filter='regex'")
             return F.data.regexp(str(value))
-
         if op in ("collection", "one_of", "in_list"):
             if value is None:
                 raise ValueError("value is required for callback filter='collection'")
             items = list(value) if isinstance(value, (list, tuple, set)) else [value]
             items = [str(x) for x in items]
             return F.data.in_(items)
-
         raise ValueError(f"Unknown callback filter: {filter}")
 
     def _register_callback(self, handler: CBHandler, **params) -> None:
@@ -598,12 +637,6 @@ class BotApp:
 
     def _member_cache_key(self, chat: ChatId, user_id: int) -> tuple[str, int]:
         return (str(chat), int(user_id))
-
-    def member_cache_clear(self) -> None:
-        self._member_cache.clear()
-
-    def member_cache_drop(self, chat: ChatId, user_id: int) -> None:
-        self._member_cache.pop(self._member_cache_key(chat, user_id), None)
 
     async def _is_member_cached(self, bot: Bot, chat: ChatId, user_id: int, *, ttl: int, allow_restricted: bool) -> bool:
         key = self._member_cache_key(chat, user_id)
@@ -638,8 +671,8 @@ class BotApp:
                 recipients,
                 message.bot.send_message,
                 text=text,
-                disable_notification=silent,
-                protect_content=protect,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
             )
         return _a
 
@@ -651,8 +684,8 @@ class BotApp:
                 recipients,
                 message.bot.send_message,
                 text=picked,
-                disable_notification=silent,
-                protect_content=protect,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
             )
         return _a
 
@@ -667,8 +700,8 @@ class BotApp:
             send = getattr(message.bot, method_name)
             payload = {
                 arg_name: self._file(media, from_path),
-                "disable_notification": silent,
-                "protect_content": protect,
+                "disable_notification": bool(silent),
+                "protect_content": bool(protect),
                 **extra,
             }
             if caption:
@@ -684,8 +717,8 @@ class BotApp:
                 message.bot.send_location,
                 latitude=latitude,
                 longitude=longitude,
-                disable_notification=silent,
-                protect_content=protect,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
             )
         return _a
 
@@ -694,8 +727,8 @@ class BotApp:
             payload = {
                 "phone_number": phone_number,
                 "first_name": first_name,
-                "disable_notification": silent,
-                "protect_content": protect,
+                "disable_notification": bool(silent),
+                "protect_content": bool(protect),
             }
             if last_name:
                 payload["last_name"] = last_name
@@ -713,10 +746,10 @@ class BotApp:
                 "question": question,
                 "options": list(options),
                 "type": pt,
-                "is_anonymous": anonymous,
-                "allows_multiple_answers": multiple_answers,
-                "disable_notification": silent,
-                "protect_content": protect,
+                "is_anonymous": bool(anonymous),
+                "allows_multiple_answers": bool(multiple_answers),
+                "disable_notification": bool(silent),
+                "protect_content": bool(protect),
             }
             if open_period is not None:
                 payload["open_period"] = int(open_period)
@@ -735,20 +768,8 @@ class BotApp:
                 recipients,
                 message.bot.send_sticker,
                 sticker=sticker,
-                disable_notification=silent,
-                protect_content=protect,
-            )
-        return _a
-
-    def action_send_dice(self, *, emoji: str = "🎲", recipients=None, silent=False, protect=False) -> Handler:
-        async def _a(message: Message) -> None:
-            await self._send_to_many(
-                message,
-                recipients,
-                message.bot.send_dice,
-                emoji=emoji,
-                disable_notification=silent,
-                protect_content=protect,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
             )
         return _a
 
@@ -757,7 +778,17 @@ class BotApp:
         emoji = self._GAME_EMOJI.get(key)
         if not emoji:
             raise ValueError(f"Unknown game_type: {game_type}")
-        return self.action_send_dice(emoji=emoji, recipients=recipients, silent=silent, protect=protect)
+
+        async def _a(message: Message) -> None:
+            await self._send_to_many(
+                message,
+                recipients,
+                message.bot.send_dice,
+                emoji=emoji,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
+            )
+        return _a
 
     def action_edit_caption(self, *, new_caption: str, target: EditTarget = "previous", message_id: Optional[int] = None, recipients: Optional[Iterable[ChatId]] = None, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> Handler:
         if target == "message_id" and message_id is None:
@@ -806,8 +837,8 @@ class BotApp:
                     chat_id=to_chat_id,
                     from_chat_id=from_chat_id,
                     message_id=message_id,
-                    disable_notification=silent,
-                    protect_content=protect,
+                    disable_notification=bool(silent),
+                    protect_content=bool(protect),
                 )
         return _a
 
@@ -995,36 +1026,11 @@ class BotApp:
     def on_callback(self, *, filter: str = "any", value=None) -> CallbackNode:
         return CallbackNode(self, filter=filter, value=value)
 
-    def node_command(self, name: str) -> Node:
-        return self.on_command(name)
-
-    def node_any(self) -> Node:
-        return self.on_any()
-
-    def node_kind(self, kind: str) -> Node:
-        return self.on_kind(kind)
-
-    def node_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
-        return self.on_text(filter=filter, value=value)
-
-    def node_callback(self, *, filter: str = "any", value=None) -> CallbackNode:
-        return self.on_callback(filter=filter, value=value)
-
     def command(self, name: str, reply_text: Optional[str] = None, *, recipients=None, silent=False, protect=False):
         if reply_text is None:
             return self.on_command(name)
         self.on_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
         return None
-
-    def random_command(self, name: str, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> None:
-        self.on_command(name).random_send(texts, recipients=recipients, silent=silent, protect=protect)
-
-    def _register_callback(self, handler: CBHandler, **params) -> None:
-        flt = self._build_callback_filter(params.get("filter", "any"), params.get("value"))
-        if flt is None:
-            self.dp.callback_query.register(handler)
-        else:
-            self.dp.callback_query.register(handler, flt)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
