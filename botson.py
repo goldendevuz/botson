@@ -14,6 +14,7 @@ ChatId = Union[int, str]
 EditTarget = Literal["previous", "message_id"]
 DeleteTarget = Literal["context", "message_id"]
 FileKind = Literal["photo", "video", "audio", "document", "voice", "animation", "sticker", "any"]
+Predicate = Callable[[Message], bool]
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,6 @@ class DownloadedFile:
 
 
 AfterDownload = Callable[[DownloadedFile], None]
-Predicate = Callable[[Message], bool]
 
 
 def _has_text(message: Message) -> bool:
@@ -71,21 +71,31 @@ def _kind_pred(kind: str) -> Predicate:
     raise ValueError(f"Unknown kind: {kind}")
 
 
+async def _delay(seconds: int) -> None:
+    s = int(seconds)
+    if s > 0:
+        await asyncio.sleep(s)
+
+
 class IfBuilder:
     def __init__(self, app: "BotApp", trigger: str, params: dict, first_pred: Predicate) -> None:
         self._app = app
         self._trigger = trigger
         self._params = params
-        self._branches: list[tuple[Predicate, Handler]] = []
-        self._else: Optional[Handler] = None
-        self._current_pred: Predicate = first_pred
+        self._branches: list[tuple[Predicate, list[Handler]]] = [(first_pred, [])]
+        self._else_chain: list[Handler] = []
 
     def then(self, handler: Handler) -> "IfBuilder":
-        self._branches.append((self._current_pred, handler))
+        self._branches[-1][1].append(handler)
         return self
 
     def then_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "IfBuilder":
         return self.then(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def then_delay(self, seconds: int) -> "IfBuilder":
+        async def _a(_: Message) -> None:
+            await _delay(seconds)
+        return self.then(_a)
 
     def then_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "IfBuilder":
         return self.then(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
@@ -97,7 +107,7 @@ class IfBuilder:
         return self.then(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
 
     def elif_(self, pred: Predicate) -> "IfBuilder":
-        self._current_pred = pred
+        self._branches.append((pred, []))
         return self
 
     def elif_text_equals(self, value: str) -> "IfBuilder":
@@ -124,11 +134,17 @@ class IfBuilder:
         return self.elif_(lambda m: _is_command(m, n))
 
     def else_(self, handler: Handler) -> "BotApp":
-        self._else = handler
+        self._else_chain.append(handler)
         return self.done()
 
     def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
         return self.else_(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def else_delay(self, seconds: int) -> "IfBuilder":
+        async def _a(_: Message) -> None:
+            await _delay(seconds)
+        self._else_chain.append(_a)
+        return self
 
     def else_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "BotApp":
         return self.else_(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
@@ -141,15 +157,16 @@ class IfBuilder:
 
     def done(self) -> "BotApp":
         branches = list(self._branches)
-        else_handler = self._else
+        else_chain = list(self._else_chain)
 
         async def _handler(message: Message) -> None:
-            for pred, h in branches:
+            for pred, chain in branches:
                 if pred(message):
-                    await h(message)
+                    for h in chain:
+                        await h(message)
                     return
-            if else_handler:
-                await else_handler(message)
+            for h in else_chain:
+                await h(message)
 
         self._app._register_trigger(self._trigger, _handler, **self._params)
         return self._app
@@ -164,6 +181,9 @@ class Node:
     def handle(self, handler: Handler) -> "BotApp":
         self._app._register_trigger(self._trigger, handler, **self._params)
         return self._app
+
+    def delay(self, seconds: int) -> "DelayedNode":
+        return DelayedNode(self._app, self._trigger, int(seconds), **self._params)
 
     def if_(self, pred: Predicate) -> IfBuilder:
         return IfBuilder(self._app, self._trigger, dict(self._params), pred)
@@ -325,6 +345,21 @@ class Node:
         return self.handle(self._app.action_download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done))
 
 
+class DelayedNode(Node):
+    def __init__(self, app: "BotApp", trigger: str, seconds: int, **params) -> None:
+        super().__init__(app, trigger, **params)
+        self._seconds = max(0, int(seconds))
+
+    def handle(self, handler: Handler) -> "BotApp":
+        seconds = self._seconds
+
+        async def _wrapped(message: Message) -> None:
+            await _delay(seconds)
+            await handler(message)
+
+        return super().handle(_wrapped)
+
+
 class BotApp:
     _KIND_FILTERS = {
         "text": F.text,
@@ -467,7 +502,6 @@ class BotApp:
                 disable_notification=silent,
                 protect_content=protect,
             )
-
         return _a
 
     def action_send_media(
@@ -499,7 +533,6 @@ class BotApp:
             if caption:
                 payload["caption"] = caption
             await self._send_to_many(message, recipients, send, **payload)
-
         return _a
 
     def action_send_location(self, *, latitude: float, longitude: float, recipients=None, silent=False, protect=False) -> Handler:
@@ -513,7 +546,6 @@ class BotApp:
                 disable_notification=silent,
                 protect_content=protect,
             )
-
         return _a
 
     def action_send_contact(
@@ -539,7 +571,6 @@ class BotApp:
             if vcard:
                 payload["vcard"] = vcard
             await self._send_to_many(message, recipients, message.bot.send_contact, **payload)
-
         return _a
 
     def action_send_poll(
@@ -581,7 +612,6 @@ class BotApp:
                     payload["explanation"] = explanation
 
             await self._send_to_many(message, recipients, message.bot.send_poll, **payload)
-
         return _a
 
     def action_send_sticker(self, *, sticker: str, recipients=None, silent=False, protect=False) -> Handler:
@@ -594,7 +624,6 @@ class BotApp:
                 disable_notification=silent,
                 protect_content=protect,
             )
-
         return _a
 
     def action_send_dice(self, *, emoji: str = "🎲", recipients=None, silent=False, protect=False) -> Handler:
@@ -607,7 +636,6 @@ class BotApp:
                 disable_notification=silent,
                 protect_content=protect,
             )
-
         return _a
 
     def action_send_game(self, *, game_type: str = "dice", recipients=None, silent=False, protect=False) -> Handler:
@@ -641,7 +669,6 @@ class BotApp:
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
                 )
-
         return _a
 
     def action_edit_text(
@@ -668,7 +695,6 @@ class BotApp:
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
                 )
-
         return _a
 
     def action_forward_message(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> Handler:
@@ -687,7 +713,6 @@ class BotApp:
                     disable_notification=silent,
                     protect_content=protect,
                 )
-
         return _a
 
     def action_delete_message(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> Handler:
@@ -699,7 +724,6 @@ class BotApp:
             mid = message_id if target == "message_id" else message.message_id
             for chat_id in chat_ids:
                 await message.bot.delete_message(chat_id=chat_id, message_id=mid)
-
         return _a
 
     def action_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> Handler:
@@ -717,7 +741,6 @@ class BotApp:
                 for chat_id in chat_ids:
                     await message.bot.send_chat_action(chat_id=chat_id, action=action)
                 await asyncio.sleep(interval)
-
         return _a
 
     def _extract_file(self, message: Message, kind: FileKind):
@@ -792,7 +815,6 @@ class BotApp:
                         kind=file_kind,
                     )
                 )
-
         return _a
 
     def on_command(self, name: str) -> Node:
