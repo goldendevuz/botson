@@ -8,10 +8,11 @@ from typing import Awaitable, Callable, Iterable, Optional, Sequence, Union, Lit
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.types.input_file import FSInputFile
 
 Handler = Callable[[Message], Awaitable[None]]
+CBHandler = Callable[[CallbackQuery], Awaitable[None]]
 ChatId = Union[int, str]
 EditTarget = Literal["previous", "message_id"]
 DeleteTarget = Literal["context", "message_id"]
@@ -83,6 +84,14 @@ def _pick_text(items: Sequence[str]) -> str:
     if not seq:
         raise ValueError("random_send requires a non-empty list of non-empty strings")
     return random.choice(seq)
+
+
+def _cb_data(cb: CallbackQuery) -> str:
+    return str(getattr(cb, "data", "") or "")
+
+
+def _cb_message(cb: CallbackQuery) -> Optional[Message]:
+    return getattr(cb, "message", None)
 
 
 class IfBuilder:
@@ -207,20 +216,6 @@ class MembershipBuilder:
     def then_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "MembershipBuilder":
         return self.then(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
 
-    def then_delay(self, seconds: int) -> "MembershipBuilder":
-        async def _a(_: Message) -> None:
-            await _delay(seconds)
-        return self.then(_a)
-
-    def then_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "MembershipBuilder":
-        return self.then(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
-
-    def then_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "MembershipBuilder":
-        return self.then(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
-
-    def then_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "MembershipBuilder":
-        return self.then(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
-
     def else_(self, handler: Handler) -> "BotApp":
         self._else_chain.append(handler)
         return self.done()
@@ -231,21 +226,6 @@ class MembershipBuilder:
     def else_random_send(self, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> "BotApp":
         return self.else_(self._app.action_random_send_message(texts, recipients=recipients, silent=silent, protect=protect))
 
-    def else_delay(self, seconds: int) -> "MembershipBuilder":
-        async def _a(_: Message) -> None:
-            await _delay(seconds)
-        self._else_chain.append(_a)
-        return self
-
-    def else_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "BotApp":
-        return self.else_(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
-
-    def else_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "BotApp":
-        return self.else_(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
-
-    def else_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
-        return self.else_(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
-
     def done(self) -> "BotApp":
         then_chain = list(self._then_chain)
         else_chain = list(self._else_chain)
@@ -254,7 +234,13 @@ class MembershipBuilder:
         allow_restricted = self._allow_restricted
 
         async def _handler(message: Message) -> None:
-            ok = await self._app._is_member_cached(message.bot, chat, message.from_user.id, ttl=ttl, allow_restricted=allow_restricted)
+            ok = await self._app._is_member_cached(
+                message.bot,
+                chat,
+                message.from_user.id,
+                ttl=ttl,
+                allow_restricted=allow_restricted,
+            )
             chain = then_chain if ok else else_chain
             for h in chain:
                 await h(message)
@@ -337,24 +323,8 @@ class Node:
     def send_location(self, latitude: float, longitude: float, **opts) -> "BotApp":
         return self.handle(self._app.action_send_location(latitude=latitude, longitude=longitude, **opts))
 
-    def send_contact(
-        self,
-        phone_number: str,
-        first_name: str,
-        *,
-        last_name: str = "",
-        vcard: str = "",
-        **opts,
-    ) -> "BotApp":
-        return self.handle(
-            self._app.action_send_contact(
-                phone_number=phone_number,
-                first_name=first_name,
-                last_name=last_name,
-                vcard=vcard,
-                **opts,
-            )
-        )
+    def send_contact(self, phone_number: str, first_name: str, *, last_name: str = "", vcard: str = "", **opts) -> "BotApp":
+        return self.handle(self._app.action_send_contact(phone_number=phone_number, first_name=first_name, last_name=last_name, vcard=vcard, **opts))
 
     def send_poll(self, question: str, options: Sequence[str], **opts) -> "BotApp":
         return self.handle(self._app.action_send_poll(question=question, options=options, **opts))
@@ -368,78 +338,72 @@ class Node:
     def send_game(self, *, game_type: str = "dice", **opts) -> "BotApp":
         return self.handle(self._app.action_send_game(game_type=game_type, **opts))
 
-    def edit_caption(
-        self,
-        new_caption: str,
-        *,
-        target: EditTarget = "previous",
-        message_id: Optional[int] = None,
-        recipients: Optional[Iterable[ChatId]] = None,
-        parse_mode: Optional[str] = "HTML",
-        reply_markup: Optional[InlineKeyboardMarkup] = None,
-    ) -> "BotApp":
-        return self.handle(
-            self._app.action_edit_caption(
-                new_caption=new_caption,
-                target=target,
-                message_id=message_id,
-                recipients=recipients,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
-            )
-        )
+    def edit_caption(self, new_caption: str, **opts) -> "BotApp":
+        return self.handle(self._app.action_edit_caption(new_caption=new_caption, **opts))
 
-    def edit_text(
-        self,
-        new_text: str,
-        *,
-        target: EditTarget = "previous",
-        message_id: Optional[int] = None,
-        recipients: Optional[Iterable[ChatId]] = None,
-        parse_mode: Optional[str] = "HTML",
-        reply_markup: Optional[InlineKeyboardMarkup] = None,
-    ) -> "BotApp":
-        return self.handle(
-            self._app.action_edit_text(
-                new_text=new_text,
-                target=target,
-                message_id=message_id,
-                recipients=recipients,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
-            )
-        )
+    def edit_text(self, new_text: str, **opts) -> "BotApp":
+        return self.handle(self._app.action_edit_text(new_text=new_text, **opts))
 
     def forward_message(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
         return self.handle(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
 
-    def delete_message(
-        self,
-        *,
-        target: DeleteTarget = "context",
-        message_id: Optional[int] = None,
-        recipients: Optional[Iterable[ChatId]] = None,
-    ) -> "BotApp":
-        return self.handle(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
+    def delete_message(self, **opts) -> "BotApp":
+        return self.handle(self._app.action_delete_message(**opts))
 
-    def show_activity(
-        self,
-        *,
-        activity: str = "typing",
-        seconds: int = 5,
-        recipients: Optional[Iterable[ChatId]] = None,
-    ) -> "BotApp":
-        return self.handle(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
+    def show_activity(self, **opts) -> "BotApp":
+        return self.handle(self._app.action_show_activity(**opts))
 
-    def download_file(
-        self,
-        *,
-        kind: FileKind = "any",
-        to_dir: str = "downloads",
-        filename: str = "",
-        on_done: Optional[AfterDownload] = None,
-    ) -> "BotApp":
-        return self.handle(self._app.action_download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done))
+    def download_file(self, **opts) -> "BotApp":
+        return self.handle(self._app.action_download_file(**opts))
+
+
+class CallbackNode:
+    def __init__(self, app: "BotApp", **params) -> None:
+        self._app = app
+        self._params = params
+
+    def handle(self, handler: CBHandler) -> "BotApp":
+        self._app._register_callback(handler, **self._params)
+        return self._app
+
+    def delay(self, seconds: int) -> "CallbackDelayedNode":
+        return CallbackDelayedNode(self._app, int(seconds), **self._params)
+
+    def answer(self, text: str = "", *, alert: bool = False, cache_time: int = 0) -> "BotApp":
+        return self.handle(self._app.action_callback_answer(text=text, alert=alert, cache_time=cache_time))
+
+    def send_message(self, text: str, *, silent: bool = False, protect: bool = False) -> "BotApp":
+        return self.handle(self._app.action_callback_send_message(text=text, silent=silent, protect=protect))
+
+    def random_send(self, texts: Sequence[str], *, silent: bool = False, protect: bool = False) -> "BotApp":
+        return self.handle(self._app.action_callback_random_send(texts=texts, silent=silent, protect=protect))
+
+    def edit_text(self, new_text: str, *, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> "BotApp":
+        return self.handle(self._app.action_callback_edit_text(new_text=new_text, parse_mode=parse_mode, reply_markup=reply_markup))
+
+    def edit_caption(self, new_caption: str, *, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> "BotApp":
+        return self.handle(self._app.action_callback_edit_caption(new_caption=new_caption, parse_mode=parse_mode, reply_markup=reply_markup))
+
+    def delete_message(self) -> "BotApp":
+        return self.handle(self._app.action_callback_delete_message())
+
+    def show_activity(self, *, activity: str = "typing", seconds: int = 5) -> "BotApp":
+        return self.handle(self._app.action_callback_show_activity(activity=activity, seconds=seconds))
+
+
+class CallbackDelayedNode(CallbackNode):
+    def __init__(self, app: "BotApp", seconds: int, **params) -> None:
+        super().__init__(app, **params)
+        self._seconds = max(0, int(seconds))
+
+    def handle(self, handler: CBHandler) -> "BotApp":
+        seconds = self._seconds
+
+        async def _wrapped(cb: CallbackQuery) -> None:
+            await _delay(seconds)
+            await handler(cb)
+
+        return super().handle(_wrapped)
 
 
 class DelayedNode(Node):
@@ -590,6 +554,48 @@ class BotApp:
 
         raise ValueError(f"Unknown text filter: {filter}")
 
+    def _build_callback_filter(self, filter: str, value):
+        op = (filter or "any").strip().lower()
+
+        if op == "any":
+            return None
+
+        if op in ("equal", "equals", "static"):
+            if value is None:
+                raise ValueError("value is required for callback filter='equal'")
+            return F.data == str(value)
+
+        if op in ("contains", "in"):
+            if value is None:
+                raise ValueError("value is required for callback filter='contains'")
+            return F.data.contains(str(value))
+
+        if op in ("starts", "starts_with", "startswith"):
+            if value is None:
+                raise ValueError("value is required for callback filter='starts'")
+            return F.data.startswith(str(value))
+
+        if op == "regex":
+            if value is None:
+                raise ValueError("value is required for callback filter='regex'")
+            return F.data.regexp(str(value))
+
+        if op in ("collection", "one_of", "in_list"):
+            if value is None:
+                raise ValueError("value is required for callback filter='collection'")
+            items = list(value) if isinstance(value, (list, tuple, set)) else [value]
+            items = [str(x) for x in items]
+            return F.data.in_(items)
+
+        raise ValueError(f"Unknown callback filter: {filter}")
+
+    def _register_callback(self, handler: CBHandler, **params) -> None:
+        flt = self._build_callback_filter(params.get("filter", "any"), params.get("value"))
+        if flt is None:
+            self.dp.callback_query.register(handler)
+        else:
+            self.dp.callback_query.register(handler, flt)
+
     def _member_cache_key(self, chat: ChatId, user_id: int) -> tuple[str, int]:
         return (str(chat), int(user_id))
 
@@ -612,14 +618,10 @@ class BotApp:
         try:
             cm = await bot.get_chat_member(chat_id=chat, user_id=user_id)
             status = getattr(cm, "status", None)
-
             if status in ("creator", "administrator", "member"):
                 ok = True
             elif status == "restricted":
-                if allow_restricted:
-                    ok = bool(getattr(cm, "is_member", True))
-                else:
-                    ok = False
+                ok = bool(getattr(cm, "is_member", True)) if allow_restricted else False
             else:
                 ok = False
         except Exception:
@@ -654,18 +656,7 @@ class BotApp:
             )
         return _a
 
-    def action_send_media(
-        self,
-        kind: str,
-        media: str,
-        caption: str = "",
-        *,
-        recipients=None,
-        silent=False,
-        protect=False,
-        from_path=False,
-        **extra,
-    ) -> Handler:
+    def action_send_media(self, kind: str, media: str, caption: str = "", *, recipients=None, silent=False, protect=False, from_path=False, **extra) -> Handler:
         k = (kind or "").strip().lower()
         spec = self._MEDIA_METHODS.get(k)
         if spec is None:
@@ -698,17 +689,7 @@ class BotApp:
             )
         return _a
 
-    def action_send_contact(
-        self,
-        *,
-        phone_number: str,
-        first_name: str,
-        last_name: str = "",
-        vcard: str = "",
-        recipients=None,
-        silent=False,
-        protect=False,
-    ) -> Handler:
+    def action_send_contact(self, *, phone_number: str, first_name: str, last_name: str = "", vcard: str = "", recipients=None, silent=False, protect=False) -> Handler:
         async def _a(message: Message) -> None:
             payload = {
                 "phone_number": phone_number,
@@ -723,21 +704,7 @@ class BotApp:
             await self._send_to_many(message, recipients, message.bot.send_contact, **payload)
         return _a
 
-    def action_send_poll(
-        self,
-        *,
-        question: str,
-        options: Sequence[str],
-        poll_type: str = "regular",
-        anonymous: bool = True,
-        multiple_answers: bool = False,
-        open_period: Optional[int] = None,
-        correct_option_id: Optional[int] = None,
-        explanation: str = "",
-        recipients=None,
-        silent=False,
-        protect=False,
-    ) -> Handler:
+    def action_send_poll(self, *, question: str, options: Sequence[str], poll_type: str = "regular", anonymous: bool = True, multiple_answers: bool = False, open_period: Optional[int] = None, correct_option_id: Optional[int] = None, explanation: str = "", recipients=None, silent=False, protect=False) -> Handler:
         pt = (poll_type or "regular").strip().lower()
         pt = "quiz" if pt in ("quiz", "test") else "regular"
 
@@ -751,16 +718,13 @@ class BotApp:
                 "disable_notification": silent,
                 "protect_content": protect,
             }
-
             if open_period is not None:
                 payload["open_period"] = int(open_period)
-
             if pt == "quiz":
                 if correct_option_id is not None:
                     payload["correct_option_id"] = int(correct_option_id)
                 if explanation:
                     payload["explanation"] = explanation
-
             await self._send_to_many(message, recipients, message.bot.send_poll, **payload)
         return _a
 
@@ -795,16 +759,7 @@ class BotApp:
             raise ValueError(f"Unknown game_type: {game_type}")
         return self.action_send_dice(emoji=emoji, recipients=recipients, silent=silent, protect=protect)
 
-    def action_edit_caption(
-        self,
-        *,
-        new_caption: str,
-        target: EditTarget = "previous",
-        message_id: Optional[int] = None,
-        recipients: Optional[Iterable[ChatId]] = None,
-        parse_mode: Optional[str] = "HTML",
-        reply_markup: Optional[InlineKeyboardMarkup] = None,
-    ) -> Handler:
+    def action_edit_caption(self, *, new_caption: str, target: EditTarget = "previous", message_id: Optional[int] = None, recipients: Optional[Iterable[ChatId]] = None, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> Handler:
         if target == "message_id" and message_id is None:
             raise ValueError("message_id is required when target='message_id'")
 
@@ -821,16 +776,7 @@ class BotApp:
                 )
         return _a
 
-    def action_edit_text(
-        self,
-        *,
-        new_text: str,
-        target: EditTarget = "previous",
-        message_id: Optional[int] = None,
-        recipients: Optional[Iterable[ChatId]] = None,
-        parse_mode: Optional[str] = "HTML",
-        reply_markup: Optional[InlineKeyboardMarkup] = None,
-    ) -> Handler:
+    def action_edit_text(self, *, new_text: str, target: EditTarget = "previous", message_id: Optional[int] = None, recipients: Optional[Iterable[ChatId]] = None, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> Handler:
         if target == "message_id" and message_id is None:
             raise ValueError("message_id is required when target='message_id'")
 
@@ -897,41 +843,27 @@ class BotApp:
         if kind == "photo" or (kind == "any" and message.photo):
             p = message.photo[-1]
             return ("photo", p.file_id, p.file_unique_id)
-
         if kind == "video" or (kind == "any" and message.video):
             v = message.video
             return ("video", v.file_id, v.file_unique_id)
-
         if kind == "audio" or (kind == "any" and message.audio):
             a = message.audio
             return ("audio", a.file_id, a.file_unique_id)
-
         if kind == "document" or (kind == "any" and message.document):
             d = message.document
             return ("document", d.file_id, d.file_unique_id)
-
         if kind == "voice" or (kind == "any" and message.voice):
             v = message.voice
             return ("voice", v.file_id, v.file_unique_id)
-
         if kind == "animation" or (kind == "any" and message.animation):
             a = message.animation
             return ("animation", a.file_id, a.file_unique_id)
-
         if kind == "sticker" or (kind == "any" and message.sticker):
             s = message.sticker
             return ("sticker", s.file_id, s.file_unique_id)
-
         return None
 
-    def action_download_file(
-        self,
-        *,
-        kind: FileKind = "any",
-        to_dir: str = "downloads",
-        filename: str = "",
-        on_done: Optional[AfterDownload] = None,
-    ) -> Handler:
+    def action_download_file(self, *, kind: FileKind = "any", to_dir: str = "downloads", filename: str = "", on_done: Optional[AfterDownload] = None) -> Handler:
         k = (kind or "any").strip().lower()
         if k not in ("photo", "video", "audio", "document", "voice", "animation", "sticker", "any"):
             raise ValueError(f"Unknown kind: {kind}")
@@ -940,21 +872,16 @@ class BotApp:
             info = self._extract_file(message, k)
             if info is None:
                 return
-
             file_kind, file_id, file_unique_id = info
             tg_file = await message.bot.get_file(file_id)
-
             out_dir = Path(to_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-
             if filename:
                 out_path = out_dir / filename
             else:
                 suffix = Path(tg_file.file_path).suffix
                 out_path = out_dir / f"{file_kind}_{file_unique_id}{suffix}"
-
             await message.bot.download_file(tg_file.file_path, destination=str(out_path))
-
             if on_done:
                 on_done(
                     DownloadedFile(
@@ -965,6 +892,92 @@ class BotApp:
                         kind=file_kind,
                     )
                 )
+        return _a
+
+    def action_callback_answer(self, *, text: str = "", alert: bool = False, cache_time: int = 0) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            await cb.answer(text=text or None, show_alert=bool(alert), cache_time=int(cache_time))
+        return _a
+
+    def action_callback_send_message(self, *, text: str, silent: bool = False, protect: bool = False) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            msg = _cb_message(cb)
+            if not msg:
+                return
+            await msg.bot.send_message(
+                chat_id=msg.chat.id,
+                text=text,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
+            )
+        return _a
+
+    def action_callback_random_send(self, *, texts: Sequence[str], silent: bool = False, protect: bool = False) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            msg = _cb_message(cb)
+            if not msg:
+                return
+            picked = _pick_text(texts)
+            await msg.bot.send_message(
+                chat_id=msg.chat.id,
+                text=picked,
+                disable_notification=bool(silent),
+                protect_content=bool(protect),
+            )
+        return _a
+
+    def action_callback_edit_text(self, *, new_text: str, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            msg = _cb_message(cb)
+            if not msg:
+                return
+            await msg.bot.edit_message_text(
+                chat_id=msg.chat.id,
+                message_id=msg.message_id,
+                text=new_text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+        return _a
+
+    def action_callback_edit_caption(self, *, new_caption: str, parse_mode: Optional[str] = "HTML", reply_markup: Optional[InlineKeyboardMarkup] = None) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            msg = _cb_message(cb)
+            if not msg:
+                return
+            await msg.bot.edit_message_caption(
+                chat_id=msg.chat.id,
+                message_id=msg.message_id,
+                caption=new_caption,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+        return _a
+
+    def action_callback_delete_message(self) -> CBHandler:
+        async def _a(cb: CallbackQuery) -> None:
+            msg = _cb_message(cb)
+            if not msg:
+                return
+            await msg.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+        return _a
+
+    def action_callback_show_activity(self, *, activity: str = "typing", seconds: int = 5) -> CBHandler:
+        key = (activity or "typing").strip().lower()
+        action = self._CHAT_ACTION.get(key)
+        if not action:
+            raise ValueError(f"Unknown activity: {activity}")
+
+        async def _a(cb: CallbackQuery) -> None:
+            msg = _cb_message(cb)
+            if not msg:
+                return
+            total = max(1, int(seconds))
+            interval = 4
+            steps = max(1, (total + interval - 1) // interval)
+            for _ in range(steps):
+                await msg.bot.send_chat_action(chat_id=msg.chat.id, action=action)
+                await asyncio.sleep(interval)
         return _a
 
     def on_command(self, name: str) -> Node:
@@ -979,6 +992,9 @@ class BotApp:
     def on_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
         return Node(self, "text", filter=filter, value=value)
 
+    def on_callback(self, *, filter: str = "any", value=None) -> CallbackNode:
+        return CallbackNode(self, filter=filter, value=value)
+
     def node_command(self, name: str) -> Node:
         return self.on_command(name)
 
@@ -991,6 +1007,9 @@ class BotApp:
     def node_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
         return self.on_text(filter=filter, value=value)
 
+    def node_callback(self, *, filter: str = "any", value=None) -> CallbackNode:
+        return self.on_callback(filter=filter, value=value)
+
     def command(self, name: str, reply_text: Optional[str] = None, *, recipients=None, silent=False, protect=False):
         if reply_text is None:
             return self.on_command(name)
@@ -999,6 +1018,13 @@ class BotApp:
 
     def random_command(self, name: str, texts: Sequence[str], *, recipients=None, silent=False, protect=False) -> None:
         self.on_command(name).random_send(texts, recipients=recipients, silent=silent, protect=protect)
+
+    def _register_callback(self, handler: CBHandler, **params) -> None:
+        flt = self._build_callback_filter(params.get("filter", "any"), params.get("value"))
+        if flt is None:
+            self.dp.callback_query.register(handler)
+        else:
+            self.dp.callback_query.register(handler, flt)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
