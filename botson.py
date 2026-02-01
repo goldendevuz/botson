@@ -26,6 +26,133 @@ class DownloadedFile:
 
 
 AfterDownload = Callable[[DownloadedFile], None]
+Predicate = Callable[[Message], bool]
+
+
+def _has_text(message: Message) -> bool:
+    return bool(getattr(message, "text", None))
+
+
+def _text(message: Message) -> str:
+    return getattr(message, "text", "") or ""
+
+
+def _is_command(message: Message, name: str) -> bool:
+    t = _text(message).strip()
+    if not t.startswith("/"):
+        return False
+    cmd = t.split()[0][1:]
+    cmd = cmd.split("@")[0]
+    return cmd == name.lstrip("/")
+
+
+def _kind_pred(kind: str) -> Predicate:
+    k = (kind or "").strip().lower()
+    if k == "text":
+        return lambda m: bool(m.text)
+    if k == "photo":
+        return lambda m: bool(m.photo)
+    if k == "video":
+        return lambda m: bool(m.video)
+    if k == "audio":
+        return lambda m: bool(m.audio)
+    if k == "document":
+        return lambda m: bool(m.document)
+    if k == "voice":
+        return lambda m: bool(m.voice)
+    if k == "animation":
+        return lambda m: bool(m.animation)
+    if k == "sticker":
+        return lambda m: bool(m.sticker)
+    if k == "location":
+        return lambda m: bool(m.location)
+    if k == "contact":
+        return lambda m: bool(m.contact)
+    raise ValueError(f"Unknown kind: {kind}")
+
+
+class IfBuilder:
+    def __init__(self, app: "BotApp", trigger: str, params: dict, first_pred: Predicate) -> None:
+        self._app = app
+        self._trigger = trigger
+        self._params = params
+        self._branches: list[tuple[Predicate, Handler]] = []
+        self._else: Optional[Handler] = None
+        self._current_pred: Predicate = first_pred
+
+    def then(self, handler: Handler) -> "IfBuilder":
+        self._branches.append((self._current_pred, handler))
+        return self
+
+    def then_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "IfBuilder":
+        return self.then(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def then_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "IfBuilder":
+        return self.then(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
+
+    def then_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "IfBuilder":
+        return self.then(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
+
+    def then_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "IfBuilder":
+        return self.then(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
+
+    def elif_(self, pred: Predicate) -> "IfBuilder":
+        self._current_pred = pred
+        return self
+
+    def elif_text_equals(self, value: str) -> "IfBuilder":
+        v = value
+        return self.elif_(lambda m: _has_text(m) and _text(m) == v)
+
+    def elif_text_contains(self, value: str) -> "IfBuilder":
+        v = value
+        return self.elif_(lambda m: _has_text(m) and v in _text(m))
+
+    def elif_text_starts(self, value: str) -> "IfBuilder":
+        v = value
+        return self.elif_(lambda m: _has_text(m) and _text(m).startswith(v))
+
+    def elif_text_regex(self, pattern: str) -> "IfBuilder":
+        p = pattern
+        return self.elif_(lambda m: _has_text(m) and bool(F.text.regexp(p).resolve(m)))
+
+    def elif_kind(self, kind: str) -> "IfBuilder":
+        return self.elif_(_kind_pred(kind))
+
+    def elif_command(self, name: str) -> "IfBuilder":
+        n = name
+        return self.elif_(lambda m: _is_command(m, n))
+
+    def else_(self, handler: Handler) -> "BotApp":
+        self._else = handler
+        return self.done()
+
+    def else_send(self, text: str, *, recipients=None, silent=False, protect=False) -> "BotApp":
+        return self.else_(self._app.action_send_message(text, recipients=recipients, silent=silent, protect=protect))
+
+    def else_show_activity(self, *, activity: str = "typing", seconds: int = 5, recipients=None) -> "BotApp":
+        return self.else_(self._app.action_show_activity(activity=activity, seconds=seconds, recipients=recipients))
+
+    def else_delete(self, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> "BotApp":
+        return self.else_(self._app.action_delete_message(target=target, message_id=message_id, recipients=recipients))
+
+    def else_forward(self, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> "BotApp":
+        return self.else_(self._app.action_forward_message(recipients=recipients, silent=silent, protect=protect))
+
+    def done(self) -> "BotApp":
+        branches = list(self._branches)
+        else_handler = self._else
+
+        async def _handler(message: Message) -> None:
+            for pred, h in branches:
+                if pred(message):
+                    await h(message)
+                    return
+            if else_handler:
+                await else_handler(message)
+
+        self._app._register_trigger(self._trigger, _handler, **self._params)
+        return self._app
 
 
 class Node:
@@ -37,6 +164,32 @@ class Node:
     def handle(self, handler: Handler) -> "BotApp":
         self._app._register_trigger(self._trigger, handler, **self._params)
         return self._app
+
+    def if_(self, pred: Predicate) -> IfBuilder:
+        return IfBuilder(self._app, self._trigger, dict(self._params), pred)
+
+    def if_text_equals(self, value: str) -> IfBuilder:
+        v = value
+        return self.if_(lambda m: _has_text(m) and _text(m) == v)
+
+    def if_text_contains(self, value: str) -> IfBuilder:
+        v = value
+        return self.if_(lambda m: _has_text(m) and v in _text(m))
+
+    def if_text_starts(self, value: str) -> IfBuilder:
+        v = value
+        return self.if_(lambda m: _has_text(m) and _text(m).startswith(v))
+
+    def if_text_regex(self, pattern: str) -> IfBuilder:
+        p = pattern
+        return self.if_(lambda m: _has_text(m) and bool(F.text.regexp(p).resolve(m)))
+
+    def if_kind(self, kind: str) -> IfBuilder:
+        return self.if_(_kind_pred(kind))
+
+    def if_command(self, name: str) -> IfBuilder:
+        n = name
+        return self.if_(lambda m: _is_command(m, n))
 
     def send_message(self, text: str, **opts) -> "BotApp":
         return self.handle(self._app.action_send_message(text, **opts))
@@ -611,7 +764,7 @@ class BotApp:
             raise ValueError(f"Unknown kind: {kind}")
 
         async def _a(message: Message) -> None:
-            info = self._extract_file(message, k)  # (kind, file_id, file_unique_id)
+            info = self._extract_file(message, k)
             if info is None:
                 return
 
@@ -642,26 +795,86 @@ class BotApp:
 
         return _a
 
-    def node_command(self, name: str) -> Node:
+    def on_command(self, name: str) -> Node:
         return Node(self, "command", name=name)
 
-    def node_any(self) -> Node:
+    def on_any(self) -> Node:
         return Node(self, "any")
 
-    def node_kind(self, kind: str) -> Node:
+    def on_kind(self, kind: str) -> Node:
         return Node(self, "kind", kind=kind)
 
-    def node_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
+    def on_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
         return Node(self, "text", filter=filter, value=value)
+
+    def node_command(self, name: str) -> Node:
+        return self.on_command(name)
+
+    def node_any(self) -> Node:
+        return self.on_any()
+
+    def node_kind(self, kind: str) -> Node:
+        return self.on_kind(kind)
+
+    def node_text(self, *, filter: str = "any", value: Optional[str] = None) -> Node:
+        return self.on_text(filter=filter, value=value)
 
     def command(self, name: str, reply_text: Optional[str] = None, *, recipients=None, silent=False, protect=False):
         if reply_text is None:
-            return self.node_command(name)
-        self.node_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
+            return self.on_command(name)
+        self.on_command(name).send_message(reply_text, recipients=recipients, silent=silent, protect=protect)
         return None
 
+    def send_photo(self, name: str, photo: str, caption: str = "", **kwargs) -> None:
+        self.on_command(name).send_photo(photo, caption, **kwargs)
+
+    def send_video(self, name: str, video: str, caption: str = "", **kwargs) -> None:
+        self.on_command(name).send_video(video, caption, **kwargs)
+
+    def send_audio(self, name: str, audio: str, caption: str = "", **kwargs) -> None:
+        self.on_command(name).send_audio(audio, caption, **kwargs)
+
+    def send_file(self, name: str, file: str, caption: str = "", **kwargs) -> None:
+        self.on_command(name).send_file(file, caption, **kwargs)
+
+    def send_animation(self, name: str, animation: str, caption: str = "", **kwargs) -> None:
+        self.on_command(name).send_animation(animation, caption, **kwargs)
+
+    def send_location(self, name: str, latitude: float, longitude: float, **kwargs) -> None:
+        self.on_command(name).send_location(latitude, longitude, **kwargs)
+
+    def send_contact(self, name: str, phone_number: str, first_name: str, last_name: str = "", vcard: str = "", **kwargs) -> None:
+        self.on_command(name).send_contact(phone_number, first_name, last_name=last_name, vcard=vcard, **kwargs)
+
+    def send_poll(self, name: str, question: str, options: Sequence[str], **kwargs) -> None:
+        self.on_command(name).send_poll(question, options, **kwargs)
+
+    def send_sticker(self, name: str, sticker: str, **kwargs) -> None:
+        self.on_command(name).send_sticker(sticker, **kwargs)
+
+    def send_dice(self, name: str, *, emoji: str = "🎲", **kwargs) -> None:
+        self.on_command(name).send_dice(emoji=emoji, **kwargs)
+
+    def send_game(self, name: str, *, game_type: str = "dice", **kwargs) -> None:
+        self.on_command(name).send_game(game_type=game_type, **kwargs)
+
+    def edit_caption(self, name: str, new_caption: str, **kwargs) -> None:
+        self.on_command(name).edit_caption(new_caption, **kwargs)
+
+    def edit_text(self, name: str, new_text: str, **kwargs) -> None:
+        self.on_command(name).edit_text(new_text, **kwargs)
+
+    def forward_message(self, name: str, *, recipients: Iterable[ChatId], silent: bool = False, protect: bool = False) -> None:
+        self.on_command(name).forward_message(recipients=recipients, silent=silent, protect=protect)
+
+    def delete_message(self, name: str, *, target: DeleteTarget = "context", message_id: Optional[int] = None, recipients=None) -> None:
+        self.on_command(name).delete_message(target=target, message_id=message_id, recipients=recipients)
+
+    def show_activity(self, name: str, *, activity: str = "typing", seconds: int = 5, recipients=None) -> None:
+        self.on_command(name).show_activity(activity=activity, seconds=seconds, recipients=recipients)
+
     def download_file(self, name: str, *, kind: FileKind = "any", to_dir: str = "downloads", filename: str = "", on_done: Optional[AfterDownload] = None) -> None:
-        self.node_command(name).download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done)
+        self.on_command(name).download_file(kind=kind, to_dir=to_dir, filename=filename, on_done=on_done)
 
     async def _run(self) -> None:
         bot = Bot(token=self.token)
